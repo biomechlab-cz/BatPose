@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wt-app"
+version = "0.1.0"
+description = "Stereo FLIR Calibration + 3D Human Pose Estimation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "opencv-contrib-python>=4.8",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "PyYAML>=6.0",
+    "mediapipe>=0.10",
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+rtmpose = [
+    "rtmlib>=0.0.5",
+    "onnxruntime>=1.16",
+]
+dev = [
+    "ruff>=0.3",
+    "pytest>=7.4",
+    "mypy>=1.5",
+    "pytest-timeout>=2.1",
+]
+
+[project.scripts]
+wt-gui    = "app.gui.__main__:main"
+wt-calib  = "app.calib.__main__:main"
+wt-pose2d = "app.pose2d.__main__:main"
+wt-recon3d = "app.recon3d.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120

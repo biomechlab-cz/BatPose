@@ -1,0 +1,89 @@
+"""CLI entry point: python -m app.pose2d"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m app.pose2d",
+        description="Extract 2D pose keypoints from stereo exercise videos.",
+    )
+    p.add_argument("--left", required=True, help="Path to left camera video")
+    p.add_argument("--right", required=True, help="Path to right camera video")
+    p.add_argument("--outdir", default=".", help="Output directory (default: current dir)")
+    p.add_argument(
+        "--backend",
+        choices=["mediapipe", "rtmpose"],
+        default="mediapipe",
+        help="Pose backend (default: mediapipe)",
+    )
+    p.add_argument("--num-poses", type=int, default=2, help="Max persons per frame")
+    return p
+
+
+def _make_backend(args: argparse.Namespace):
+    if args.backend == "mediapipe":
+        from .mediapipe_backend import MediaPipeBackend
+
+        return MediaPipeBackend(num_poses=args.num_poses)
+    elif args.backend == "rtmpose":
+        try:
+            from .rtmpose_backend import RTMPoseBackend
+
+            return RTMPoseBackend()
+        except ImportError:
+            print(
+                "RTMPose backend requires: pip install rtmlib onnxruntime",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        raise ValueError(f"Unknown backend: {args.backend!r}")
+
+
+def _progress(pct: int, msg: str) -> None:
+    bar_len = 30
+    filled = int(bar_len * pct / 100)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    out_left = str(outdir / "pose2d_left.npz")
+    out_right = str(outdir / "pose2d_right.npz")
+
+    from .pipeline import process_video, save_pose2d
+
+    print(f"Backend: {args.backend}")
+
+    for label, video_path, out_path in [
+        ("LEFT", args.left, out_left),
+        ("RIGHT", args.right, out_right),
+    ]:
+        print(f"\nProcessing {label}: {video_path!r}")
+        backend = _make_backend(args)
+        try:
+            kps, conf, meta = process_video(video_path, backend, progress_cb=_progress)
+            save_pose2d(kps, conf, meta, out_path)
+            print(f"\n  → saved {out_path}  shape={kps.shape}  fps={meta['fps']:.1f}")
+        except Exception as e:
+            print(f"\n\nError: {e}", file=sys.stderr)
+            return 1
+        finally:
+            backend.close()
+
+    print(f"\nDone. Files written to: {outdir}/")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

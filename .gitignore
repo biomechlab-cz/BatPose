@@ -1,0 +1,23 @@
+# Hidden / dotfile directories (e.g. .claude, .venv, .pytest_cache, .ruff_cache, .idea, .vscode)
+.*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Large test data files (videos, etc.) — keep local only
+data/
+
+# QA / HITL / UX reports — kept local
+reports/
+
+# Agent-specific instructions — not shared
+CLAUDE.md
