@@ -24,6 +24,15 @@ class DetectionResult:
 
     obj_pts: np.ndarray  # [N, 3] float32
     img_pts: np.ndarray  # [N, 2] float32
+    # Unique identifier per detected point (ChArUco corner index for ChArUco,
+    # a 0..N-1 range for chessboards).  Used by stereo calibration to intersect
+    # the point set when the two cameras don't see the same subset of corners.
+    ids: np.ndarray | None = None  # [N] int32
+    # Diagnostic fields — filled even on partial / failed detection.
+    # n_markers > 0 but len(img_pts)==0 means ArUco markers were found but
+    # the ChArUco board layout didn't match (wrong squares_x/y or dictionary).
+    n_markers: int = 0    # raw ArUco markers detected
+    partial: bool = False # True = markers found but board not matched
 
 
 class BoardDetector:
@@ -83,9 +92,11 @@ class ChessboardDetector(BoardDetector):
         if not ret or corners is None:
             return None
         corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), self._criteria)
+        n = self._obj_pts.shape[0]
         return DetectionResult(
             obj_pts=self._obj_pts.copy(),
             img_pts=corners.reshape(-1, 2),
+            ids=np.arange(n, dtype=np.int32),
         )
 
     @property
@@ -151,26 +162,119 @@ class CharucoDetector(BoardDetector):
             marker_size,
             aruco_dict,
         )
-        self._detector = cv2.aruco.CharucoDetector(self._board)
+
+        # Tune ArUco detection parameters for fisheye / wide-angle cameras.
+        #
+        # Default parameters assume a perspective camera with well-conditioned
+        # perspective projections.  Fisheye lenses produce heavy barrel distortion
+        # that:
+        #   • Makes marker squares appear curved / trapezoid near the image edges
+        #   • Reduces the effective pixel size of markers at typical distances
+        #
+        # Key changes from defaults:
+        #   minMarkerPerimeterRate   0.03 → 0.02   slightly smaller markers accepted (fisheye)
+        #   adaptiveThreshWinSizeMax 23   → 123    multi-scale sweep covers close-up boards
+        #   adaptiveThreshWinSizeStep 10  (kept)   step=20 breaks small-marker detection
+        #   polygonalApproxAccuracyRate  0.03 → 0.15  tolerate fisheye-curved marker edges
+        #   cornerRefinementMethod   NONE → SUBPIX  sub-pixel corner accuracy
+        #   errorCorrectionRate      0.6  (kept)  rate < 0.5 → 0 errors, kills fisheye
+        params = cv2.aruco.DetectorParameters()
+        # --- Fisheye-friendly geometry relaxations ---
+        # minMarkerPerimeterRate: 0.02 instead of default 0.03 so markers near
+        # the edges of a fisheye frame (which appear compressed) are still found.
+        params.minMarkerPerimeterRate = 0.02        # default 0.03
+        params.maxMarkerPerimeterRate = 4.0         # default 4.0 (keep)
+        # adaptiveThreshWinSizeMax: must exceed the pixel width of a single checker
+        # square so the thresholder bridges across the light→dark boundary.
+        # At typical working distance squares are ~30–60 px, close-up ~100–150 px.
+        # With step=10, max=123: windows 3,13,23,33,43,53,63,73,83,93,103,113,123.
+        # 13 px is the sweet spot for medium-range markers (~6 px cells).
+        # 33 px is the sweet spot for close-up markers (~19 px cells).
+        params.adaptiveThreshWinSizeMin = 3         # default 3  (keep)
+        params.adaptiveThreshWinSizeMax = 123       # default 23 → cover close-up boards too
+        params.adaptiveThreshWinSizeStep = 10       # default 10 (keep) — step=20 skipped the
+                                                     # 13 px and 33 px windows that are critical
+                                                     # for small (medium-range) and close-up
+                                                     # markers respectively
+        # polygonalApproxAccuracyRate: fisheye distortion bends straight marker edges into
+        # curves, so the polygon approximation must allow more deviation from a perfect
+        # quadrilateral.  0.15 (vs default 0.03) is needed for ≥150° FOV lenses.
+        params.polygonalApproxAccuracyRate = 0.15
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        # errorCorrectionRate semantics: max_errors = floor(rate × minHammingDist / 2).
+        # For DICT_6X6_250 minHammingDist ≥ 6, so rate=0.6 allows floor(0.6×3)=1 error.
+        # Rate < 1/(minHammingDist) → 0 errors (pixel-perfect) — too strict for fisheye.
+        # Keep default 0.6 (1-bit tolerance). Background false-positives that pass at
+        # 0 errors also pass at 1; the ≥2-marker gate in detect() handles those instead.
+        params.errorCorrectionRate = 0.6            # default (keep)
+
+        # Pass via positional args — keyword names differ across OpenCV 4.x Python
+        # bindings and using the wrong name causes a silent TypeError that is caught
+        # by the caller and leaves self._detector = None with no visible feedback.
+        charuco_params = cv2.aruco.CharucoParameters()
+        # minMarkers=1: allow interpolating a ChArUco corner from a single adjacent
+        # detected marker instead of requiring both neighbours.
+        # Default=2 means if 10/17 markers are found (~59%), each corner has only
+        # ~35% chance of having both neighbours → ~8 corners expected, below min_corners=12.
+        # With minMarkers=1 the same 10 markers yield ~20 corners, well above threshold.
+        try:
+            charuco_params.minMarkers = 1
+        except AttributeError:
+            pass  # OpenCV < 4.8 — fall back to default (2)
+        self._detector = cv2.aruco.CharucoDetector(self._board, charuco_params, params)
 
     def detect(self, gray: np.ndarray) -> DetectionResult | None:
-        charuco_corners, charuco_ids, _marker_corners, _marker_ids = self._detector.detectBoard(
+        charuco_corners, charuco_ids, _marker_corners, marker_ids = self._detector.detectBoard(
             gray
         )
+
+        n_markers = int(len(marker_ids)) if marker_ids is not None else 0
+
+        # A single-marker "detection" in the background is almost always a false
+        # positive — require at least 2 for the partial-detection diagnostic.
+        _partial_threshold = 2
+
         if (
             charuco_corners is None
             or charuco_ids is None
             or len(charuco_corners) < self.min_corners
         ):
+            # Return a partial result when multiple ArUco markers were found —
+            # this lets the UI distinguish "nothing at all" from "markers seen but
+            # board config mismatch (wrong squares_x/y or dictionary)".
+            if n_markers >= _partial_threshold:
+                return DetectionResult(
+                    obj_pts=np.empty((0, 3), np.float32),
+                    img_pts=np.empty((0, 2), np.float32),
+                    n_markers=n_markers,
+                    partial=True,
+                )
             return None
 
-        ret, obj_pts, img_pts = self._board.matchImagePoints(charuco_corners, charuco_ids)
-        if not ret or obj_pts is None or len(obj_pts) < self.min_corners:
+        # OpenCV API drift: matchImagePoints returns either (objPoints, imgPoints) in
+        # 4.7/4.8 or (ret, objPoints, imgPoints) in some 4.x bindings.  Handle both.
+        _ret = self._board.matchImagePoints(charuco_corners, charuco_ids)
+        if len(_ret) == 2:
+            obj_pts, img_pts = _ret
+        else:
+            _, obj_pts, img_pts = _ret
+        if obj_pts is None or len(obj_pts) < self.min_corners:
+            # Board layout didn't fit — markers were found but squares_x/y or
+            # dictionary don't match the physical board.
+            if n_markers >= _partial_threshold:
+                return DetectionResult(
+                    obj_pts=np.empty((0, 3), np.float32),
+                    img_pts=np.empty((0, 2), np.float32),
+                    n_markers=n_markers,
+                    partial=True,
+                )
             return None
 
         return DetectionResult(
             obj_pts=obj_pts.reshape(-1, 3).astype(np.float32),
             img_pts=img_pts.reshape(-1, 2).astype(np.float32),
+            ids=np.asarray(charuco_ids).flatten().astype(np.int32),
+            n_markers=n_markers,
         )
 
     @property

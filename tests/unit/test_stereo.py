@@ -141,27 +141,69 @@ class TestCalibrateStereoPointMismatch:
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         return FrameSelection(frame, frame, det_l, det_r, score=0.4)
 
-    def test_raises_on_first_frame_mismatch(self):
-        """If any frame has mismatched corner counts, ValueError must be raised."""
+    def test_raises_when_counts_mismatch_and_no_ids(self):
+        """Without per-point ids and unequal counts, intersection is impossible → raise."""
         from app.calib.stereo import calibrate_stereo
 
-        # 9 corners in left, 6 in right (simulates ChArUco partial detection)
+        # 9 corners in left, 6 in right, ids=None → can't intersect
         sel = self._make_mismatched_selection(9, 6)
-        selections = [sel] * 5  # > 3 to pass the minimum-frame guard
+        selections = [sel] * 5
 
-        with pytest.raises(ValueError, match="left camera detected"):
+        with pytest.raises(ValueError, match="did not record per-point ids"):
             calibrate_stereo(selections, img_size=(640, 480))
 
     def test_error_message_includes_frame_index(self):
-        """The error must report which frame caused the mismatch."""
+        """When raising for missing-ids mismatch, the offending frame index is reported."""
         from app.calib.stereo import calibrate_stereo
 
-        good = _make_frame_selection(9)  # equal counts
+        good = _make_frame_selection(9)  # equal counts, no ids — uses positional match
         bad = self._make_mismatched_selection(9, 4)
         selections = [good, good, good, bad, good]  # frame index 3 is bad
 
         with pytest.raises(ValueError, match="Frame 3"):
             calibrate_stereo(selections, img_size=(640, 480))
+
+    def test_charuco_id_intersection_succeeds_with_partial_overlap(self):
+        """When per-point ids ARE present, calibrate_stereo intersects them
+        rather than raising, so partially-overlapping ChArUco detections work."""
+        from unittest.mock import patch
+
+        from app.calib.board import DetectionResult
+        from app.calib.frame_select import FrameSelection
+        from app.calib.stereo import calibrate_stereo
+
+        rng = np.random.default_rng(11)
+
+        def _det(ids: list[int]) -> DetectionResult:
+            n = len(ids)
+            return DetectionResult(
+                obj_pts=np.zeros((n, 3), dtype=np.float32),
+                img_pts=rng.uniform(50, 590, (n, 2)).astype(np.float32),
+                ids=np.array(ids, dtype=np.int32),
+            )
+
+        # L sees ids 0..9 (10 pts), R sees ids 4..13 (10 pts) — overlap = 6 pts (4..9)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        sel = FrameSelection(
+            frame, frame,
+            _det(list(range(10))),
+            _det(list(range(4, 14))),
+            score=0.5,
+        )
+        selections = [sel] * 5
+
+        fake_K, fake_D, fake_R, fake_T, fake_E, fake_F = _fake_cv2_returns()
+        with (
+            patch("cv2.calibrateCamera", return_value=(0.5, fake_K, fake_D, [], [])),
+            patch(
+                "cv2.stereoCalibrate",
+                return_value=(0.5, fake_K, fake_D, fake_K, fake_D,
+                              fake_R, fake_T, fake_E, fake_F),
+            ),
+        ):
+            result = calibrate_stereo(selections, img_size=(640, 480))
+
+        assert result["rms"] == 0.5
 
     def test_matching_counts_do_not_raise(self):
         """Consistent point counts (both cameras detect same N) must not raise."""

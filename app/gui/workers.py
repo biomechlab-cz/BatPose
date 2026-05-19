@@ -186,6 +186,162 @@ class Pose2DWorker(_BaseWorker):
         return results
 
 
+class CaptureWorker(_BaseWorker):
+    """
+    Live stereo capture worker.
+
+    Streams frames from any BaseCapture source (FLIR or VideoSimulator).
+    Emits frame_ready for UI preview at a throttled rate (~15 fps).
+    Recording to AVI can be toggled at runtime via begin_recording / end_recording.
+    When recording stops (or the worker is cancelled while recording), recording_finished
+    is emitted with the output file paths.
+    """
+
+    frame_ready = Signal(object)  # CaptureFrame
+    recording_finished = Signal(str, str)  # left_path, right_path
+
+    def __init__(self, source, parent=None):
+        super().__init__(parent)
+        self._source = source
+        # These are written by the main thread and read by the worker thread.
+        # Plain bool/str assignments are atomic under the GIL.
+        self._do_record: bool = False
+        self._out_left: str = ""
+        self._out_right: str = ""
+
+    def begin_recording(self, out_left: str, out_right: str) -> None:
+        self._out_left = out_left
+        self._out_right = out_right
+        self._do_record = True
+
+    def end_recording(self) -> None:
+        self._do_record = False
+
+    def _run(self) -> Any:
+        import cv2 as cv
+
+        self._source.start()
+        writer_l: Any = None
+        writer_r: Any = None
+        was_recording = False
+        frame_idx = 0
+        preview_stride = max(1, round(self._source.fps / 15))
+
+        try:
+            while not self._cancelled:
+                frame = self._source.read()
+                if frame is None:
+                    break
+
+                if frame_idx % preview_stride == 0:
+                    self.frame_ready.emit(frame)
+
+                # Transition: idle → recording
+                if self._do_record and not was_recording:
+                    h, w = frame.frame_left.shape[:2]
+                    fourcc = cv.VideoWriter_fourcc(*"MJPG")
+                    writer_l = cv.VideoWriter(self._out_left, fourcc, self._source.fps, (w, h))
+                    writer_r = cv.VideoWriter(self._out_right, fourcc, self._source.fps, (w, h))
+                    was_recording = True
+
+                # Transition: recording → idle
+                if not self._do_record and was_recording:
+                    writer_l.release()
+                    writer_r.release()
+                    writer_l = writer_r = None
+                    was_recording = False
+                    self.recording_finished.emit(self._out_left, self._out_right)
+
+                if was_recording:
+                    writer_l.write(frame.frame_left)
+                    writer_r.write(frame.frame_right)
+
+                frame_idx += 1
+                self._progress(0, f"Frame {frame.frame_index}  {frame.timestamp:.1f} s")
+
+        finally:
+            if writer_l is not None:
+                writer_l.release()
+            if writer_r is not None:
+                writer_r.release()
+            if was_recording:
+                self.recording_finished.emit(self._out_left, self._out_right)
+            self._source.stop()
+
+        return None
+
+
+class LiveCalibWorker(_BaseWorker):
+    """
+    Run stereo calibration from frame pairs captured live from the cameras.
+
+    Accepts the list of FrameSelection objects already collected in the UI,
+    calls calibrate_stereo() directly (no video I/O), and saves calibration.yml.
+
+    lens_model controls which distortion model is used:
+        0 — Standard   (5 coefficients: k1 k2 p1 p2 k3)
+        1 — Wide-angle  (8 coefficients: rational model, k1-k6)
+        2 — Fisheye    (OpenCV fisheye θ-based model)
+    """
+
+    #: Lens model index → (label, intrinsics_flags, use_fisheye)
+    _LENS_MODELS = [
+        ("standard",    0,                             False),
+        ("wide-angle",  _cv2.CALIB_RATIONAL_MODEL,     False),
+        ("fisheye",     0,                             True),
+    ]
+
+    def __init__(
+        self,
+        selections: list,          # list[FrameSelection] — stereo pairs (extrinsics)
+        img_size: tuple[int, int],
+        board_cfg: dict,
+        output_path: str,
+        lens_model: int = 0,       # 0=standard, 1=wide-angle, 2=fisheye
+        all_det_l: list | None = None,  # DetectionResult list — left intrinsics pool
+        all_det_r: list | None = None,  # DetectionResult list — right intrinsics pool
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._selections = selections
+        self._img_size = img_size
+        self._board_cfg = board_cfg
+        self._output_path = output_path
+        self._lens_model = lens_model
+        self._all_det_l = all_det_l
+        self._all_det_r = all_det_r
+
+    def _run(self) -> Any:
+        from app.calib.stereo import calibrate_stereo, calibrate_stereo_fisheye, save_calibration
+
+        _label, intrinsics_flags, use_fisheye = self._LENS_MODELS[self._lens_model]
+
+        if use_fisheye:
+            calib = calibrate_stereo_fisheye(
+                self._selections,
+                self._img_size,
+                progress_cb=self._progress,
+                cancel_check=self._check_cancelled,
+                all_det_l=self._all_det_l,
+                all_det_r=self._all_det_r,
+            )
+        else:
+            calib = calibrate_stereo(
+                self._selections,
+                self._img_size,
+                intrinsics_flags=intrinsics_flags,
+                progress_cb=self._progress,
+                cancel_check=self._check_cancelled,
+                all_det_l=self._all_det_l,
+                all_det_r=self._all_det_r,
+            )
+        if self._cancelled:
+            return None
+
+        save_calibration(calib, self._board_cfg, self._output_path)
+        return self._output_path
+
+
 class Recon3DWorker(_BaseWorker):
     """Run 3D reconstruction in a background thread."""
 

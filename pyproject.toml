@@ -7,11 +7,11 @@ name = "wt-app"
 version = "0.1.0"
 description = "Stereo FLIR Calibration + 3D Human Pose Estimation"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "opencv-contrib-python>=4.8",
-    "numpy>=1.26",
+    "numpy>=1.26,<2.0",
     "scipy>=1.11",
     "PyYAML>=6.0",
     "mediapipe>=0.10",
@@ -33,6 +33,14 @@ dev = [
     "pytest-timeout>=2.1",
 ]
 
+# ── FLIR camera support ──────────────────────────────────────────────────────
+# The PySpin / spinnaker-python wheel is vendored under external/ because the
+# Teledyne FLIR licence forbids redistribution via PyPI.  It is INTENTIONALLY
+# not listed as a dependency above — `uv sync` would strip it.  Install with:
+#     uv pip install external/spinnaker_python-4.3.0.190-cp310-cp310-win_amd64.whl
+# Re-run that command after any `uv sync` or it will get removed again.
+# The app degrades gracefully to the video-simulator source when PySpin is absent.
+
 [project.scripts]
 wt-gui    = "app.gui.__main__:main"
 wt-calib  = "app.calib.__main__:main"
@@ -44,7 +52,7 @@ packages = ["app"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]

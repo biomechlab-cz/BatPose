@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from .error_dialog import show_worker_error
+from .pose2d_preview import Pose2DPreview, derive_pose2d_paths
 from .viewer3d import SkeletonViewer3D
 from .workers import Pose2DWorker, Recon3DWorker
 
@@ -66,6 +67,8 @@ class ReconTab(QWidget):
         self._worker: QWidget | None = None
         self._project_dir: str | None = None
         self._pose3d_path: str | None = None
+        self._pose2d_left_path: str | None = None
+        self._pose2d_right_path: str | None = None
         self._playing = False
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_timer_tick)
@@ -257,10 +260,14 @@ class ReconTab(QWidget):
 
         splitter.addWidget(ctrl_panel)
 
-        # ── Right panel: 3D viewer + timeline ─────────────────────────
+        # ── Right panel: 2D previews + 3D viewer + timeline ──────────
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Small 2D previews to sanity-check pose detection
+        self._preview_2d = Pose2DPreview()
+        right_layout.addWidget(self._preview_2d)
 
         self._viewer = SkeletonViewer3D()
         right_layout.addWidget(self._viewer, 1)
@@ -493,6 +500,10 @@ class ReconTab(QWidget):
             out_3d = self._out_edit.text().strip() or str(out_dir / "pose3d.npz")
 
         self._out_3d = out_3d
+        # Remember pose2d locations so the 2D preview can pick them up after the
+        # pipeline completes (or even mid-pipeline if pose2d finishes first).
+        self._pose2d_left_path = out_left
+        self._pose2d_right_path = out_right
         backend_name = "mediapipe" if self._backend_combo.currentIndex() == 0 else "rtmpose"
 
         self._log_msg(f"\nStep 1/2: Extracting 2D poses (backend={backend_name})…")
@@ -522,6 +533,10 @@ class ReconTab(QWidget):
         if result is None:
             self._on_pipeline_done(None)
             return
+
+        # Refresh the 2D preview as soon as pose2d files exist — gives the user a
+        # quick sanity check on detection quality before the slower 3D step finishes.
+        self._refresh_2d_preview()
 
         # Check for large NPZ frame-count mismatch before starting recon3d
         try:
@@ -631,9 +646,30 @@ class ReconTab(QWidget):
             # Update timer interval (respects current speed setting)
             self._on_speed_changed(0)
 
+            # Try to derive matching pose2d paths next to pose3d.npz, then
+            # populate the small 2D previews. Falls back gracefully if files
+            # aren't present.
+            inferred_l, inferred_r = derive_pose2d_paths(path)
+            if inferred_l:
+                self._pose2d_left_path = inferred_l
+            if inferred_r:
+                self._pose2d_right_path = inferred_r
+            self._refresh_2d_preview()
+
             self._log_msg(f"Loaded {path} — {T} frames, {joints3d.shape[1]} person(s)")
         except Exception as e:
             self._log_msg(f"Failed to load {path}: {e}")
+
+    def _refresh_2d_preview(self) -> None:
+        """Push current video + pose2d paths into the preview widget."""
+        left_video = self._left_edit.text().strip() or None
+        right_video = self._right_edit.text().strip() or None
+        self._preview_2d.set_data(
+            left_video,
+            right_video,
+            self._pose2d_left_path,
+            self._pose2d_right_path,
+        )
 
     def _on_export(self) -> None:
         if self._pose3d_path is None:
@@ -712,6 +748,8 @@ class ReconTab(QWidget):
 
     def _on_slider_changed(self, value: int) -> None:
         self._viewer.show_frame(value)
+        # Keep the 2D previews in lock-step with the 3D scrubber.
+        self._preview_2d.show_frame(value)
         T = self._viewer.frame_count
         self._frame_label.setText(f"Frame: {value} / {max(0, T - 1)}")
 

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .calib_tab import CalibTab
+from .capture_tab import CaptureTab
 from .recon_tab import ReconTab
 from .welcome_dialog import WelcomeDialog
 
@@ -24,7 +25,7 @@ _SESSION_FILE = Path.home() / ".config" / "wt-app" / "session.json"
 
 
 class MainWindow(QMainWindow):
-    """Top-level application window with Calibration and Reconstruction tabs."""
+    """Top-level application window with Calibration, Reconstruction, and Capture tabs."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -74,15 +75,21 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._calib_tab = CalibTab()
         self._recon_tab = ReconTab()
+        self._capture_tab = CaptureTab()
 
         self._tabs.addTab(self._calib_tab, "Calibration")
         self._tabs.addTab(self._recon_tab, "Reconstruction / 3D View")
+        self._tabs.addTab(self._capture_tab, "Live Capture")
         self.setCentralWidget(self._tabs)
 
         # Wire signals between tabs
         self._calib_tab.calibration_saved.connect(self._recon_tab.set_calibration)
         self._calib_tab.calibration_saved.connect(self._on_calib_saved)
+        # Live calibration from the Capture tab feeds the same pipeline
+        self._capture_tab.calibration_saved.connect(self._recon_tab.set_calibration)
+        self._capture_tab.calibration_saved.connect(self._on_calib_saved)
         self._recon_tab.pose3d_ready.connect(self._on_pose3d_ready)
+        self._capture_tab.recording_saved.connect(self._on_recording_saved)
 
         # Status bar
         self._status = QStatusBar()
@@ -112,6 +119,7 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"Project: {path}")
         self._calib_tab.set_project_dir(path)
         self._recon_tab.set_project_dir(path)
+        self._capture_tab.set_project_dir(path)
 
     def _load_cached(self, project_dir: str) -> None:
         """Auto-load cached results if present."""
@@ -137,6 +145,9 @@ class MainWindow(QMainWindow):
 
     def _on_pose3d_ready(self, path: str) -> None:
         self._status.showMessage(f"3D pose ready: {path}")
+
+    def _on_recording_saved(self, left: str, right: str) -> None:
+        self._status.showMessage(f"Recording saved: {Path(left).name}, {Path(right).name}")
 
     def _on_export_csv(self) -> None:
         """Delegate to recon tab export."""
@@ -179,6 +190,7 @@ class MainWindow(QMainWindow):
                     "calib": rt._calib_edit.text(),
                     "out": rt._out_edit.text(),
                 },
+                "capture": self._capture_tab.session_state(),
             }
             _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
             _SESSION_FILE.write_text(json.dumps(session, indent=2))
@@ -213,10 +225,17 @@ class MainWindow(QMainWindow):
                     rt._calib_edit.setText(calib_path)
                 if out := recon.get("out"):
                     rt._out_edit.setText(out)
+
+            if cap := session.get("capture"):
+                self._capture_tab.restore_session(cap)
         except Exception:
             pass  # restore is best-effort
 
     def closeEvent(self, event) -> None:
+        # Stop the capture thread before the window (and its children) are
+        # destroyed; otherwise the QThread C++ destructor runs while the thread
+        # is still blocked in GetNextImage, producing a Qt warning / crash.
+        self._capture_tab.cleanup()
         self._save_session()
         super().closeEvent(event)
 

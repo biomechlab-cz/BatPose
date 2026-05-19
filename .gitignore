@@ -21,3 +21,14 @@ reports/
 
 # Agent-specific instructions — not shared
 CLAUDE.md
+
+# Vendored third-party wheels (PySpin / spinnaker-python — license forbids redistribution)
+external/
+
+# Pipeline output artifacts (regenerated locally)
+pose3d.npz
+*.avi
+*.npz
+
+# Dev scratch
+.write_test

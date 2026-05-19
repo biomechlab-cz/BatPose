@@ -16,6 +16,18 @@ class CaptureFrame:
     frame_right: np.ndarray  # BGR uint8 [H, W, 3]
     timestamp: float  # seconds from capture start
     frame_index: int
+    # Hardware timestamps from the camera's internal clock (nanoseconds).
+    # Set by FlirCapture via img.GetTimeStamp(); None for VideoSimulator.
+    # The delta between the two values measures hardware sync quality.
+    hw_timestamp_left_ns: int | None = None
+    hw_timestamp_right_ns: int | None = None
+
+    @property
+    def hw_delta_us(self) -> float | None:
+        """Absolute difference between hardware timestamps in microseconds, or None."""
+        if self.hw_timestamp_left_ns is None or self.hw_timestamp_right_ns is None:
+            return None
+        return abs(self.hw_timestamp_left_ns - self.hw_timestamp_right_ns) / 1_000.0
 
 
 class BaseCapture(ABC):
