@@ -170,6 +170,32 @@ class SkeletonViewer3D(QWidget):
         self._rebuild_items()
         self.show_frame(0)
 
+    def set_frame(self, joints: np.ndarray, conf: np.ndarray) -> None:
+        """Live-update helper: render a single frame without a time loop.
+
+        Args:
+            joints: [P, 17, 3] float32 — current pose joints in metres
+            conf:   [P, 17]    float32 — current confidence
+        """
+        if joints.ndim == 3:
+            joints = joints[None]  # add T dim
+            conf = conf[None]
+        # Only rebuild GL items if the person count changed; otherwise just
+        # update in-place — rebuilding allocates new line/scatter items per
+        # call and is too expensive for live tracking at 5-10 Hz.
+        P_new = int(joints.shape[1])
+        if P_new != self._P or self._joints3d is None:
+            self._joints3d = joints
+            self._conf3d = conf
+            self._T = 1
+            self._P = P_new
+            self._rebuild_items()
+        else:
+            self._joints3d = joints
+            self._conf3d = conf
+            self._T = 1
+        self.show_frame(0)
+
     def clear(self) -> None:
         """Remove all skeleton data."""
         self._joints3d = None

@@ -63,6 +63,73 @@ def triangulate_points_dlt(
     return pts3d.astype(np.float32)
 
 
+def triangulate_frame_pair(
+    kp2d_l: np.ndarray,
+    kp2d_r: np.ndarray,
+    conf_l: np.ndarray,
+    conf_r: np.ndarray,
+    K1: np.ndarray, D1: np.ndarray,
+    K2: np.ndarray, D2: np.ndarray,
+    R:  np.ndarray, T:  np.ndarray,
+    min_conf: float = 0.3,
+    max_reproj_err: float = 20.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Triangulate one stereo frame of 2D keypoints into 3D.
+
+    Single-frame analogue of recon3d.pipeline.reconstruct3d — same DLT
+    triangulation, reprojection-error gate, and confidence rule, but without
+    the time loop and OneEuro smoothing.  Designed for live use.
+
+    Args:
+        kp2d_l, kp2d_r:  [P, J, 2] or [J, 2] pixel keypoints
+        conf_l, conf_r:  [P, J] or [J] confidences
+        K1, D1, K2, D2, R, T:  stereo calibration
+        min_conf:        joints with either-view conf below this → conf3d=0
+        max_reproj_err:  joints with reprojection err above this → conf3d=0
+
+    Returns:
+        (joints3d, conf3d, repro_err) — shapes [P, J, 3], [P, J], [P, J].
+        joints3d entries for rejected joints are zeroed.
+    """
+    # Promote single-person to [1, J, …]
+    if kp2d_l.ndim == 2:
+        kp2d_l = kp2d_l[None]; kp2d_r = kp2d_r[None]
+        conf_l = conf_l[None]; conf_r = conf_r[None]
+    P, J, _ = kp2d_l.shape
+
+    P1_norm = np.hstack([np.eye(3), np.zeros((3, 1))])
+    P2_norm = np.hstack([R, T.reshape(3, 1)])
+    R1 = np.eye(3)
+    t1 = np.zeros(3)
+    t2 = T.flatten()
+
+    out_3d   = np.zeros((P, J, 3), dtype=np.float32)
+    out_conf = np.zeros((P, J),    dtype=np.float32)
+    out_err  = np.full((P, J), np.inf, dtype=np.float32)
+
+    for p in range(P):
+        pts_l = kp2d_l[p]
+        pts_r = kp2d_r[p]
+        c_l   = conf_l[p]
+        c_r   = conf_r[p]
+
+        pts_l_norm = undistort_points(pts_l, K1, D1)
+        pts_r_norm = undistort_points(pts_r, K2, D2)
+        pts3d = triangulate_points_dlt(P1_norm, P2_norm, pts_l_norm, pts_r_norm)
+
+        err_l = reprojection_error(pts3d, K1, D1, R1, t1, pts_l)
+        err_r = reprojection_error(pts3d, K2, D2, R, t2, pts_r)
+        err_mean = (err_l + err_r) * 0.5
+        valid = (c_l >= min_conf) & (c_r >= min_conf) & (err_mean <= max_reproj_err)
+
+        out_3d[p]   = pts3d
+        out_conf[p] = np.minimum(c_l, c_r) * valid.astype(np.float32)
+        out_err[p]  = err_mean
+        out_3d[p, ~valid] = 0.0
+
+    return out_3d, out_conf, out_err
+
+
 def reprojection_error(
     pts3d: np.ndarray,
     K: np.ndarray,

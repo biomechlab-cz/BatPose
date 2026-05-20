@@ -117,7 +117,15 @@ class _FullscreenPreview(QDialog):
             )
         self._label.setPixmap(pix)
 
+from .viewer3d import COCO17_EDGES, SkeletonViewer3D
 from .workers import CaptureWorker
+
+_COCO17_NAMES = [
+    "nose", "L-eye", "R-eye", "L-ear", "R-ear",
+    "L-shoulder", "R-shoulder", "L-elbow", "R-elbow",
+    "L-wrist", "R-wrist", "L-hip", "R-hip",
+    "L-knee", "R-knee", "L-ankle", "R-ankle",
+]
 
 try:
     import PySpin as _PySpin  # noqa: F401
@@ -193,6 +201,25 @@ class CaptureTab(QWidget):
         # Fullscreen preview dialog ("L" or "R" side, or None when closed).
         self._fs_preview: _FullscreenPreview | None = None
         self._fs_side: str | None = None
+
+        # ── Live Pose Tracking state ───────────────────────────────────────
+        # Mutually exclusive with calibration mode (toggling one closes the other).
+        self._pose_active: bool = False
+        self._pose_backend = None              # PoseBackend instance
+        self._pose_calib: dict | None = None   # loaded calibration.yml as dict
+        # Single in-flight pose-detection future, mirrors the ChArUco pattern.
+        self._pose_future: _Future | None = None
+        self._pose_submitted_fl: np.ndarray | None = None
+        self._pose_submitted_fr: np.ndarray | None = None
+        # OneEuro filters per (person, joint, axis), lazily allocated.
+        self._pose_filters: list | None = None
+        # Last computed 2D/3D pose, used to repaint the overlay between detections.
+        self._pose_last_kp_l: np.ndarray | None = None  # [P, 17, 2]
+        self._pose_last_kp_r: np.ndarray | None = None
+        self._pose_last_conf_l: np.ndarray | None = None  # [P, 17]
+        self._pose_last_conf_r: np.ndarray | None = None
+        self._pose_last_3d: np.ndarray | None = None  # [P, 17, 3]
+        self._pose_last_conf_3d: np.ndarray | None = None
         # Track outcome of last 20 detection cycles: 'both' / 'left' / 'right' / 'none'.
         # Used to render the stability indicator under the L/R status labels.
         self._detect_history: deque = deque(maxlen=20)
@@ -229,6 +256,9 @@ class CaptureTab(QWidget):
         # Close fullscreen preview if it's open — it would otherwise outlive its parent.
         if self._fs_preview is not None:
             self._fs_preview.close()
+        # Stop live pose tracking and release the backend's C++ resources.
+        if self._pose_active:
+            self._stop_pose_tracking()
         # Shut down the board-detection thread pools gracefully.
         self._detect_pool.shutdown(wait=False)
         CaptureTab._detect_lr_pool.shutdown(wait=False)
@@ -540,6 +570,16 @@ class CaptureTab(QWidget):
         # Use clicked (not toggled) so we can intercept and show a discard warning.
         self._calib_mode_btn.clicked.connect(self._on_calib_mode_clicked)
         stream_layout.addWidget(self._calib_mode_btn)
+
+        self._pose_mode_btn = QPushButton("🧍  Live Pose")
+        self._pose_mode_btn.setCheckable(True)
+        self._pose_mode_btn.setEnabled(False)
+        self._pose_mode_btn.setToolTip(
+            "Run 2D pose detection on both cameras and triangulate to 3D in real "
+            "time. Requires a calibration.yml."
+        )
+        self._pose_mode_btn.clicked.connect(self._on_pose_mode_clicked)
+        stream_layout.addWidget(self._pose_mode_btn)
 
         self._status_label = QLabel("Idle")
         self._status_label.setStyleSheet("color: #888;")
@@ -872,6 +912,125 @@ class CaptureTab(QWidget):
 
         root.addWidget(self._calib_panel)
 
+        # ── Live Pose Tracking panel (parallel to calibration panel) ────────
+        self._setup_pose_panel(root)
+
+    # ------------------------------------------------------------------
+    # Live Pose Tracking — UI construction
+    # ------------------------------------------------------------------
+
+    def _setup_pose_panel(self, root: QVBoxLayout) -> None:
+        """Bottom-of-tab panel for live 2D→3D pose tracking."""
+        self._pose_panel = QFrame()
+        self._pose_panel.setObjectName("posePanel")
+        self._pose_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self._pose_panel.setStyleSheet(
+            "QFrame#posePanel { background:#162026; border:1px solid #2a3940;"
+            " border-radius:6px; }"
+        )
+        self._pose_panel.setVisible(False)
+
+        panel_v = QVBoxLayout(self._pose_panel)
+        panel_v.setContentsMargins(12, 10, 12, 10)
+
+        # Header row — title + close button + hint
+        hdr = QHBoxLayout()
+        title = QLabel("<b style='color:#2ecc71;'>🧍 Live Pose Tracking</b>")
+        hdr.addWidget(title)
+        hint = QLabel(
+            "<span style='color:#aaa;'>Loads <i>calibration.yml</i>, runs MediaPipe on "
+            "each camera and triangulates joints into 3D in real time.</span>"
+        )
+        hint.setWordWrap(True)
+        hdr.addWidget(hint, 1)
+        self._pose_close_btn = QPushButton("✕  Close Live Pose")
+        self._pose_close_btn.clicked.connect(self._on_pose_close_clicked)
+        hdr.addWidget(self._pose_close_btn)
+        panel_v.addLayout(hdr)
+
+        # Body: 3 columns — Settings | Status | 3D viewer
+        cols = QHBoxLayout()
+
+        # Column 1 — Settings
+        set_col = QGroupBox("Settings")
+        set_form = QFormLayout(set_col)
+
+        calib_row = QHBoxLayout()
+        self._pose_calib_edit = QLineEdit()
+        self._pose_calib_edit.setPlaceholderText("Path to calibration.yml")
+        calib_browse = QPushButton("…")
+        calib_browse.setFixedWidth(32)
+        calib_browse.clicked.connect(self._on_pose_browse_calib)
+        calib_row.addWidget(self._pose_calib_edit)
+        calib_row.addWidget(calib_browse)
+        calib_row_w = QWidget(); calib_row_w.setLayout(calib_row)
+        set_form.addRow("Calibration:", calib_row_w)
+
+        self._pose_backend_combo = QComboBox()
+        self._pose_backend_combo.addItems(["MediaPipe (CPU)"])
+        set_form.addRow("Backend:", self._pose_backend_combo)
+
+        self._pose_num_spin = QSpinBox()
+        self._pose_num_spin.setRange(1, 4)
+        self._pose_num_spin.setValue(1)
+        set_form.addRow("Persons:", self._pose_num_spin)
+
+        self._pose_min_conf_spin = QDoubleSpinBox()
+        self._pose_min_conf_spin.setRange(0.0, 1.0)
+        self._pose_min_conf_spin.setSingleStep(0.05)
+        self._pose_min_conf_spin.setValue(0.3)
+        set_form.addRow("Min conf:", self._pose_min_conf_spin)
+
+        self._pose_max_reproj_spin = QDoubleSpinBox()
+        self._pose_max_reproj_spin.setRange(1.0, 200.0)
+        self._pose_max_reproj_spin.setSingleStep(1.0)
+        self._pose_max_reproj_spin.setValue(20.0)
+        self._pose_max_reproj_spin.setSuffix(" px")
+        set_form.addRow("Max reproj err:", self._pose_max_reproj_spin)
+
+        self._pose_overlay_check = QCheckBox("Overlay 2D skeleton on previews")
+        self._pose_overlay_check.setChecked(True)
+        set_form.addRow(self._pose_overlay_check)
+
+        self._pose_smooth_check = QCheckBox("Temporal smoothing (One-Euro)")
+        self._pose_smooth_check.setChecked(True)
+        set_form.addRow(self._pose_smooth_check)
+
+        self._pose_start_btn = QPushButton("▶  Start Tracking")
+        self._pose_start_btn.setCheckable(True)
+        self._pose_start_btn.setMinimumHeight(34)
+        self._pose_start_btn.clicked.connect(self._on_pose_start_clicked)
+        set_form.addRow(self._pose_start_btn)
+        cols.addWidget(set_col, 1)
+
+        # Column 2 — Status
+        stat_col = QGroupBox("Status")
+        stat_v = QVBoxLayout(stat_col)
+        stat_v.setSpacing(8)
+        self._pose_status_label = QLabel("Idle")
+        self._pose_status_label.setStyleSheet(
+            "font-size: 14px; color:#aaa; background:#1a1a1a; padding:8px; border-radius:4px;"
+        )
+        self._pose_status_label.setWordWrap(True)
+        stat_v.addWidget(self._pose_status_label)
+        self._pose_metrics_label = QLabel("")
+        self._pose_metrics_label.setStyleSheet("font-size: 12px; color:#888;")
+        self._pose_metrics_label.setWordWrap(True)
+        stat_v.addWidget(self._pose_metrics_label)
+        stat_v.addStretch()
+        cols.addWidget(stat_col, 1)
+
+        # Column 3 — 3D viewer
+        view_col = QGroupBox("3D Skeleton (live)")
+        view_v = QVBoxLayout(view_col)
+        self._pose_3d_view = SkeletonViewer3D()
+        self._pose_3d_view.setMinimumHeight(280)
+        view_v.addWidget(self._pose_3d_view)
+        cols.addWidget(view_col, 2)
+
+        panel_v.addLayout(cols)
+        root.addWidget(self._pose_panel)
+
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
@@ -1031,6 +1190,7 @@ class CaptureTab(QWidget):
         self._stop_btn.setEnabled(True)
         self._record_btn.setEnabled(True)
         self._calib_mode_btn.setEnabled(True)
+        self._pose_mode_btn.setEnabled(True)
         self._status_label.setText("Streaming…")
 
     def _on_stop(self) -> None:
@@ -1106,6 +1266,51 @@ class CaptureTab(QWidget):
             self._preview_right.setPixmap(_bgr_to_pixmap(
                 CaptureTab._draw_overlay(frame.frame_right, self._det_right, "R"), 480
             ))
+        elif self._pose_active:
+            # ── Live Pose Tracking branch ─────────────────────────────────
+            # Collect any completed detection.
+            if self._pose_future is not None and self._pose_future.done():
+                try:
+                    kps_l, conf_l, kps_r, conf_r = self._pose_future.result()
+                    self._process_pose_result(kps_l, conf_l, kps_r, conf_r)
+                except Exception as _exc:
+                    import traceback as _tb
+                    print(f"[live pose] exception: {_exc}\n{_tb.format_exc()}")
+                    self._pose_status_label.setText(
+                        f"<span style='color:#e74c3c'>Error: {_exc}</span>"
+                    )
+                finally:
+                    self._pose_future = None
+
+            # Submit next detection if idle (reuse the same shared thread pool).
+            if (
+                self._pose_future is None
+                and self._pose_backend is not None
+                and not self._pool_shutdown
+            ):
+                fl = frame.frame_left.copy()
+                fr = frame.frame_right.copy()
+                self._pose_submitted_fl = fl
+                self._pose_submitted_fr = fr
+                try:
+                    self._pose_future = self._detect_pool.submit(
+                        CaptureTab._pose_detect_pair, self._pose_backend, fl, fr,
+                    )
+                except RuntimeError:
+                    self._pool_shutdown = True
+
+            # Display with 2D skeleton overlay drawn from the last completed result.
+            if self._pose_overlay_check.isChecked() and self._pose_last_kp_l is not None:
+                left = self._draw_pose_overlay(
+                    frame.frame_left, self._pose_last_kp_l, self._pose_last_conf_l,
+                )
+                right = self._draw_pose_overlay(
+                    frame.frame_right, self._pose_last_kp_r, self._pose_last_conf_r,
+                )
+            else:
+                left, right = frame.frame_left, frame.frame_right
+            self._preview_left.setPixmap(_bgr_to_pixmap(left, 480))
+            self._preview_right.setPixmap(_bgr_to_pixmap(right, 480))
         else:
             self._preview_left.setPixmap(_bgr_to_pixmap(frame.frame_left, 480))
             self._preview_right.setPixmap(_bgr_to_pixmap(frame.frame_right, 480))
@@ -1220,6 +1425,14 @@ class CaptureTab(QWidget):
         self._detect_submitted_fr = None
         self._detect_frame_fl = None
         self._detect_frame_fr = None
+        # Also disable Live Pose mode — no stream means no input.
+        if self._pose_active:
+            self._stop_pose_tracking()
+            self._pose_start_btn.setChecked(False)
+            self._pose_start_btn.setText("▶  Start Tracking")
+        self._pose_mode_btn.setEnabled(False)
+        self._pose_mode_btn.setChecked(False)
+        self._pose_panel.setVisible(False)
         self._last_frame = None
         self._refresh_state()
 
@@ -1294,6 +1507,231 @@ class CaptureTab(QWidget):
         self._calib_panel.setVisible(True)
         self._update_calib_counter()
         self._reset_detection_labels()
+
+    # ------------------------------------------------------------------
+    # Live Pose Tracking — handlers
+    # ------------------------------------------------------------------
+
+    def _on_pose_mode_clicked(self, checked: bool) -> None:
+        """Toggle the Live Pose panel.  Mutually exclusive with Calibration Mode."""
+        if not checked:
+            self._on_pose_close_clicked()
+            return
+        # Close calibration mode first if it's open (mutually exclusive).
+        if self._calib_mode_btn.isChecked():
+            self._calib_mode_btn.setChecked(False)
+            self._calib_panel.setVisible(False)
+            self._detector = None
+        # Pre-fill the calibration path from the project if not set.
+        if not self._pose_calib_edit.text().strip():
+            if self._project_dir:
+                guess = Path(self._project_dir) / "calibration.yml"
+                if guess.exists():
+                    self._pose_calib_edit.setText(str(guess))
+        self._pose_panel.setVisible(True)
+
+    def _on_pose_close_clicked(self) -> None:
+        """Stop live tracking (if running) and hide the panel."""
+        if self._pose_active:
+            self._stop_pose_tracking()
+        self._pose_mode_btn.setChecked(False)
+        self._pose_panel.setVisible(False)
+
+    def _on_pose_browse_calib(self) -> None:
+        start = self._pose_calib_edit.text().strip() or (self._project_dir or "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select calibration.yml", start, "YAML (*.yml *.yaml)",
+        )
+        if path:
+            self._pose_calib_edit.setText(path)
+
+    def _on_pose_start_clicked(self, checked: bool) -> None:
+        if checked:
+            try:
+                self._start_pose_tracking()
+                self._pose_start_btn.setText("⏹  Stop Tracking")
+            except Exception as exc:
+                QMessageBox.warning(self, "Live Pose error", str(exc))
+                self._pose_start_btn.setChecked(False)
+                self._pose_start_btn.setText("▶  Start Tracking")
+        else:
+            self._stop_pose_tracking()
+            self._pose_start_btn.setText("▶  Start Tracking")
+
+    def _start_pose_tracking(self) -> None:
+        """Load calibration, build the backend, and switch into live mode."""
+        calib_path = self._pose_calib_edit.text().strip()
+        if not calib_path or not Path(calib_path).exists():
+            raise RuntimeError(
+                "Set a valid path to calibration.yml first "
+                "(use the Calibration tab or live calibration to produce one)."
+            )
+
+        from app.calib.stereo import load_calibration  # noqa: PLC0415
+        self._pose_calib = load_calibration(calib_path)
+
+        # Build the backend on the main thread (it owns C++ resources / model load).
+        # Using the same instance for both cameras means detect() is serialised
+        # within the worker thread.  MediaPipe is fast enough on CPU for live use.
+        from app.pose2d.mediapipe_backend import MediaPipeBackend  # noqa: PLC0415
+        n_poses = int(self._pose_num_spin.value())
+        self._pose_backend = MediaPipeBackend(num_poses=n_poses)
+
+        # Drop any prior smoothing state so a fresh stream starts clean.
+        self._pose_filters = None
+        self._pose_last_kp_l = None
+        self._pose_last_kp_r = None
+        self._pose_last_conf_l = None
+        self._pose_last_conf_r = None
+        self._pose_last_3d = None
+        self._pose_last_conf_3d = None
+
+        self._pose_active = True
+        self._pose_status_label.setText(
+            "Tracking — waiting for first frame…"
+        )
+
+    def _stop_pose_tracking(self) -> None:
+        """Stop the live pose loop and release backend resources."""
+        self._pose_active = False
+        if self._pose_backend is not None:
+            try:
+                self._pose_backend.close()
+            except Exception:
+                pass
+        self._pose_backend = None
+        # Cancel any in-flight future result by discarding it on next tick.
+        self._pose_future = None
+        self._pose_status_label.setText("Idle")
+        # Clear overlays so the preview stops showing stale 2D landmarks.
+        self._pose_last_kp_l = None
+        self._pose_last_kp_r = None
+
+    @staticmethod
+    def _pose_detect_pair(backend, frame_l: np.ndarray, frame_r: np.ndarray):
+        """Run pose detection on both frames (serial — MediaPipe isn't thread-safe).
+
+        Returns (kps_l, conf_l, kps_r, conf_r) with shapes [P,17,2] / [P,17].
+        """
+        kps_l, conf_l = backend.detect(frame_l)
+        kps_r, conf_r = backend.detect(frame_r)
+        return kps_l, conf_l, kps_r, conf_r
+
+    def _process_pose_result(
+        self,
+        kps_l: np.ndarray, conf_l: np.ndarray,
+        kps_r: np.ndarray, conf_r: np.ndarray,
+    ) -> None:
+        """Triangulate the freshly-detected stereo pose, smooth, update the viewer."""
+        assert self._pose_calib is not None
+        from app.recon3d.triangulate import triangulate_frame_pair  # noqa: PLC0415
+
+        # Align person counts across views (MediaPipe may detect a different number
+        # per view); take the minimum so the [P, ...] shapes match for triangulation.
+        P = min(kps_l.shape[0], kps_r.shape[0])
+        if P == 0:
+            self._pose_status_label.setText(
+                "<span style='color:#e67e22'>No person detected in either view.</span>"
+            )
+            return
+        kps_l = kps_l[:P]; conf_l = conf_l[:P]
+        kps_r = kps_r[:P]; conf_r = conf_r[:P]
+
+        calib = self._pose_calib
+        joints3d, conf3d, repro = triangulate_frame_pair(
+            kps_l, kps_r, conf_l, conf_r,
+            calib["K1"], calib["D1"], calib["K2"], calib["D2"],
+            calib["R"], calib["T"],
+            min_conf=float(self._pose_min_conf_spin.value()),
+            max_reproj_err=float(self._pose_max_reproj_spin.value()),
+        )
+
+        # OneEuro smoothing — lazy-init filters on first frame (sized to the
+        # actual P × J × 3 we got).  Falls back to identity when the smoothing
+        # toggle is off.
+        if self._pose_smooth_check.isChecked():
+            joints3d = self._apply_pose_smoothing(joints3d, conf3d)
+
+        # Stash for overlay/repaint between detections.
+        self._pose_last_kp_l = kps_l
+        self._pose_last_kp_r = kps_r
+        self._pose_last_conf_l = conf_l
+        self._pose_last_conf_r = conf_r
+        self._pose_last_3d = joints3d
+        self._pose_last_conf_3d = conf3d
+
+        # Push to the 3D viewer.
+        self._pose_3d_view.set_frame(joints3d, conf3d)
+
+        # Metrics readout.
+        n_valid = int((conf3d > 0).sum())
+        n_total = conf3d.size
+        mean_err = float(np.mean(repro[np.isfinite(repro)])) if np.isfinite(repro).any() else float("nan")
+        self._pose_status_label.setText(
+            f"<span style='color:#2ecc71'>● Tracking</span> "
+            f"<span style='color:#aaa'>· persons {P} · joints {n_valid}/{n_total} valid</span>"
+        )
+        self._pose_metrics_label.setText(
+            f"mean reproj err: {mean_err:.2f} px"
+            if np.isfinite(mean_err) else "mean reproj err: —"
+        )
+
+    def _apply_pose_smoothing(
+        self, joints3d: np.ndarray, conf3d: np.ndarray,
+    ) -> np.ndarray:
+        """Apply per-axis OneEuro smoothing.  Uses ~camera-fps as the sampling rate."""
+        from app.recon3d.smooth import OneEuroFilter  # noqa: PLC0415
+
+        P, J, _ = joints3d.shape
+        # Allocate one filter per (p, j, axis).  Re-allocate if P changed.
+        if self._pose_filters is None or len(self._pose_filters) != P * J * 3:
+            fps_hint = (
+                float(self._last_frame.fps) if self._last_frame is not None
+                and getattr(self._last_frame, "fps", 0) else 20.0
+            )
+            self._pose_filters = [
+                OneEuroFilter(fps=fps_hint, min_cutoff=0.5, beta=0.05, d_cutoff=1.0)
+                for _ in range(P * J * 3)
+            ]
+
+        smoothed = joints3d.copy()
+        for p in range(P):
+            for j in range(J):
+                if conf3d[p, j] <= 0:
+                    # No valid measurement — repeat the last smoothed value if any,
+                    # else leave the zeroed sample.
+                    if self._pose_last_3d is not None and p < self._pose_last_3d.shape[0]:
+                        smoothed[p, j] = self._pose_last_3d[p, j]
+                    continue
+                for ax in range(3):
+                    idx = (p * J + j) * 3 + ax
+                    smoothed[p, j, ax] = float(self._pose_filters[idx](
+                        float(joints3d[p, j, ax])
+                    ))
+        return smoothed
+
+    def _draw_pose_overlay(self, bgr: np.ndarray, kps: np.ndarray, conf: np.ndarray) -> np.ndarray:
+        """Draw the COCO-17 skeleton over a BGR frame.  Returns a new image."""
+        if kps is None or kps.size == 0:
+            return bgr
+        out = bgr.copy()
+        for p in range(kps.shape[0]):
+            pts = kps[p]
+            c = conf[p]
+            for i, j in COCO17_EDGES:
+                if c[i] < 0.1 or c[j] < 0.1:
+                    continue
+                a = (int(pts[i, 0]), int(pts[i, 1]))
+                b = (int(pts[j, 0]), int(pts[j, 1]))
+                cv2.line(out, a, b, (0, 220, 80), 2, cv2.LINE_AA)
+            for k in range(pts.shape[0]):
+                if c[k] < 0.1:
+                    continue
+                cv2.circle(
+                    out, (int(pts[k, 0]), int(pts[k, 1])), 4,
+                    (0, 255, 255), -1, cv2.LINE_AA,
+                )
+        return out
 
     def _reset_detection_labels(self) -> None:
         """Reset the detection status labels to the idle (grey) state."""
