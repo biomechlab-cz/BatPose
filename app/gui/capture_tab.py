@@ -62,6 +62,52 @@ class _ClickableLabel(QLabel):
         super().mouseReleaseEvent(ev)
 
 
+class _Fullscreen3DSkeleton(QDialog):
+    """Frameless fullscreen dialog wrapping a SkeletonViewer3D.
+
+    The caller pushes live frames via `set_frame()`.  A clean click (or
+    double-click) anywhere on the GL canvas closes the dialog; Esc and F11 do
+    the same.  Dragging still orbits the view.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("3D Skeleton — full screen")
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setStyleSheet("background:#0a0a0a;")
+        self.setModal(False)
+
+        # Local import to avoid a circular: viewer3d imports nothing of ours.
+        from .viewer3d import SkeletonViewer3D as _SkV  # noqa: PLC0415
+        self.viewer = _SkV(self)
+        self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Same gesture as the camera fullscreen preview: a clean click closes
+        # (drag still orbits).  Double-click also closes, for backward compat.
+        self.viewer.clicked.connect(self.close)
+        self.viewer.double_clicked.connect(self.close)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.viewer)
+
+        hint = QLabel(
+            "3D Skeleton — full screen   —   click or press Esc to close",
+            self.viewer,
+        )
+        hint.setStyleSheet(
+            "background: rgba(0,0,0,160); color:#ddd; padding:6px 12px;"
+            "border-radius:4px; font-size:13px;"
+        )
+        hint.adjustSize()
+        hint.move(16, 16)
+        hint.raise_()
+
+        QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self.close)
+
+    def set_frame(self, joints: np.ndarray, conf: np.ndarray) -> None:
+        self.viewer.set_frame(joints, conf)
+
+
 class _FullscreenPreview(QDialog):
     """Frameless fullscreen dialog showing a single camera preview.
 
@@ -201,6 +247,8 @@ class CaptureTab(QWidget):
         # Fullscreen preview dialog ("L" or "R" side, or None when closed).
         self._fs_preview: _FullscreenPreview | None = None
         self._fs_side: str | None = None
+        # Fullscreen 3D-skeleton dialog (None when closed).
+        self._fs_3d: _Fullscreen3DSkeleton | None = None
 
         # ── Live Pose Tracking state ───────────────────────────────────────
         # Mutually exclusive with calibration mode (toggling one closes the other).
@@ -253,9 +301,12 @@ class CaptureTab(QWidget):
                 self._worker.terminate()  # last resort; avoids the Qt warning
                 self._worker.wait(1000)
         self._worker = None
-        # Close fullscreen preview if it's open — it would otherwise outlive its parent.
+        # Close fullscreen preview / 3D pop-out if they're open — they would
+        # otherwise outlive their parent.
         if self._fs_preview is not None:
             self._fs_preview.close()
+        if self._fs_3d is not None:
+            self._fs_3d.close()
         # Stop live pose tracking and release the backend's C++ resources.
         if self._pose_active:
             self._stop_pose_tracking()
@@ -279,6 +330,7 @@ class CaptureTab(QWidget):
             "sync": self._sync_check.isChecked(),
             "fps": self._fps_spin.value(),
             "exposure_us": self._exposure_spin.value(),
+            "gain_db": self._gain_spin.value(),
             "sim_left": self._sim_left.text(),
             "sim_right": self._sim_right.text(),
             "sim_loop": self._sim_loop.isChecked(),
@@ -318,6 +370,8 @@ class CaptureTab(QWidget):
             self._fps_spin.setValue(fps)
         if exp := state.get("exposure_us"):
             self._exposure_spin.setValue(exp)
+        if gain := state.get("gain_db"):
+            self._gain_spin.setValue(gain)
         self._sim_left.setText(state.get("sim_left", ""))
         self._sim_right.setText(state.get("sim_right", ""))
         self._sim_loop.setChecked(bool(state.get("sim_loop", False)))
@@ -489,6 +543,19 @@ class CaptureTab(QWidget):
         self._exposure_spin.setSuffix(" µs")
         step3_form.addRow("Exposure:", self._exposure_spin)
 
+        self._gain_spin = QDoubleSpinBox()
+        self._gain_spin.setRange(0.0, 47.9)
+        self._gain_spin.setValue(10.0)
+        self._gain_spin.setSuffix(" dB")
+        self._gain_spin.setSingleStep(1.0)
+        self._gain_spin.setDecimals(1)
+        self._gain_spin.setToolTip(
+            "Analogue gain applied to both cameras equally.\n"
+            "0 dB = sensor floor (may be too dark indoors).\n"
+            "10–15 dB is typical for indoor fluorescent lighting."
+        )
+        step3_form.addRow("Gain:", self._gain_spin)
+
         flir_layout.addWidget(self._step3)
         ctrl_layout.addWidget(self._flir_area)
 
@@ -610,8 +677,24 @@ class CaptureTab(QWidget):
         self._preview_right.setToolTip("Click to inspect at full screen (Esc to close)")
         self._preview_right.clicked.connect(lambda: self._open_fullscreen_preview("R"))
 
-        preview_layout.addWidget(self._preview_left)
-        preview_layout.addWidget(self._preview_right)
+        # 3D skeleton preview, sized to match the camera previews.  Visible
+        # only while Live Pose tracking is running; hidden otherwise so it
+        # doesn't steal layout space from the camera images.
+        self._preview_3d = SkeletonViewer3D()
+        self._preview_3d.setMinimumSize(320, 240)
+        self._preview_3d.setVisible(False)
+        # Single clean click opens fullscreen — same gesture as the camera
+        # previews; drag still orbits.  (Not double-click: a double-click would
+        # fire `clicked` on its first release and then toggle straight back.)
+        self._preview_3d.clicked.connect(self._open_fullscreen_3d)
+
+        # Equal stretch so each panel gets a fair share of the width.  The 3D
+        # viewer (Expanding) then fills its third instead of sitting at its
+        # 320 px minimum while the camera labels hog the row.  When the 3D
+        # viewer is hidden (not tracking) the two cameras split the full width.
+        preview_layout.addWidget(self._preview_left, 1)
+        preview_layout.addWidget(self._preview_right, 1)
+        preview_layout.addWidget(self._preview_3d, 1)
         right_layout.addWidget(preview_group, 1)
 
         # Sync-quality bar — shows hardware timestamp delta per frame pair
@@ -623,6 +706,10 @@ class CaptureTab(QWidget):
         self._sync_quality_label = QLabel("")
         self._sync_quality_label.setMinimumWidth(160)
         sync_row.addWidget(self._sync_quality_label)
+        sync_row.addWidget(QLabel("  Drops:"))
+        self._drop_label = QLabel("0")
+        self._drop_label.setMinimumWidth(40)
+        sync_row.addWidget(self._drop_label)
         sync_row.addStretch()
         self._rec_status = QLabel("")
         self._rec_status.setStyleSheet("color:#e74c3c; font-weight:bold;")
@@ -1020,13 +1107,8 @@ class CaptureTab(QWidget):
         stat_v.addStretch()
         cols.addWidget(stat_col, 1)
 
-        # Column 3 — 3D viewer
-        view_col = QGroupBox("3D Skeleton (live)")
-        view_v = QVBoxLayout(view_col)
-        self._pose_3d_view = SkeletonViewer3D()
-        self._pose_3d_view.setMinimumHeight(280)
-        view_v.addWidget(self._pose_3d_view)
-        cols.addWidget(view_col, 2)
+        # (3D viewer lives in the Live Preview row, not in this bottom panel —
+        # see self._preview_3d.  Showing it twice would be wasteful.)
 
         panel_v.addLayout(cols)
         root.addWidget(self._pose_panel)
@@ -1145,25 +1227,23 @@ class CaptureTab(QWidget):
             self._out_edit.setText(path)
 
     def _on_start(self) -> None:
-        # Warn when exposure + estimated sensor readout leaves no margin for the trigger.
-        # BlackflyS readout time at full resolution (1280×1024) is ~15 ms.
-        # Less than 3 ms of margin and the secondary will start missing triggers.
+        # Warn only when exposure exceeds 95% of the frame period.
+        # The camera firmware enforces the hard limit itself; this warning
+        # catches configurations that leave almost no headroom for the
+        # hardware trigger handshake on the secondary camera.
         if self._radio_flir.isChecked() and self._sync_check.isChecked():
             fps = self._fps_spin.value()
             exposure_us = self._exposure_spin.value()
             frame_period_us = 1_000_000.0 / fps
-            readout_us = 15_000.0  # conservative estimate for BlackflyS at full res
-            margin_us = frame_period_us - exposure_us - readout_us
-            if margin_us < 3_000:
+            usage_pct = exposure_us / frame_period_us * 100.0
+            if usage_pct > 95.0:
                 ans = QMessageBox.question(
                     self,
-                    "Timing margin too tight",
-                    f"At {fps:.0f} fps with {exposure_us/1000:.1f} ms exposure the estimated "
-                    f"readout margin is only <b>{margin_us/1000:.1f} ms</b>.<br><br>"
-                    "The secondary camera will likely miss triggers, causing sync errors "
-                    "or a constant ~one-frame offset between cameras.<br><br>"
-                    f"Recommended maximum fps at this exposure: "
-                    f"<b>{1_000_000/(exposure_us + readout_us + 3_000):.0f} fps</b><br><br>"
+                    "Exposure near frame-period limit",
+                    f"At {fps:.0f} fps the frame period is {frame_period_us/1000:.1f} ms. "
+                    f"A {exposure_us/1000:.1f} ms exposure uses <b>{usage_pct:.0f}%</b> of "
+                    f"that, leaving under 5% for the hardware trigger handshake.<br><br>"
+                    "The secondary camera may miss triggers at this setting.<br><br>"
                     "Continue anyway?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 )
@@ -1221,6 +1301,15 @@ class CaptureTab(QWidget):
 
     def _on_frame_ready(self, frame) -> None:
         self._last_frame = frame
+
+        drops = frame.dropped_frames
+        if drops > 0:
+            color = "#e74c3c" if self._is_recording else "#e67e22"
+            self._drop_label.setText(f"<b style='color:{color}'>{drops}</b>")
+            self._drop_label.setTextFormat(Qt.TextFormat.RichText)
+        else:
+            self._drop_label.setText("0")
+            self._drop_label.setStyleSheet("color: inherit;")
 
         if self._calib_mode_btn.isChecked():
             # Collect completed detection result and pair it with the submitted frames
@@ -1351,6 +1440,31 @@ class CaptureTab(QWidget):
         self._fs_preview = None
         self._fs_side = None
 
+    def _open_fullscreen_3d(self) -> None:
+        """Open the 3D skeleton in a frameless fullscreen window.
+
+        Re-opens (toggles closed) if it's already up — same gesture as the
+        camera previews.  The dialog's own viewer is fed live frames from
+        the same source data already going to the inline preview.
+        """
+        if self._fs_3d is not None:
+            self._fs_3d.close()
+            return
+        dlg = _Fullscreen3DSkeleton(parent=self)
+        dlg.finished.connect(self._on_fullscreen_3d_closed)
+        # Use the same view defaults the inline preview was configured with
+        # so the user lands on a sensible framing immediately.
+        dlg.viewer.setup_live_view()
+        # Seed with the most recent pose so we don't show an empty grid for
+        # a tick.
+        if self._pose_last_3d is not None and self._pose_last_conf_3d is not None:
+            dlg.set_frame(self._pose_last_3d, self._pose_last_conf_3d)
+        self._fs_3d = dlg
+        dlg.showFullScreen()
+
+    def _on_fullscreen_3d_closed(self, _result: int = 0) -> None:
+        self._fs_3d = None
+
     def _update_sync_indicator(self, frame) -> None:
         if frame.hw_timestamp_left_ns is None or frame.hw_timestamp_right_ns is None:
             # VideoSimulator — no hardware timestamps
@@ -1414,6 +1528,8 @@ class CaptureTab(QWidget):
         self._sync_delta_label.setText("—")
         self._sync_delta_label.setStyleSheet("color: #888;")
         self._sync_quality_label.setText("")
+        self._drop_label.setText("0")
+        self._drop_label.setStyleSheet("")
         # Disable calibration mode and clean up detection state
         self._calib_mode_btn.setEnabled(False)
         self._calib_mode_btn.setChecked(False)
@@ -1504,6 +1620,16 @@ class CaptureTab(QWidget):
             self._calib_mode_btn.setChecked(False)
             return
 
+        # Mutually exclusive with Live Pose — close that panel if open so the
+        # user only ever sees one bottom panel at a time.
+        if self._pose_mode_btn.isChecked() or self._pose_panel.isVisible():
+            if self._pose_active:
+                self._stop_pose_tracking()
+                self._pose_start_btn.setChecked(False)
+                self._pose_start_btn.setText("▶  Start Tracking")
+            self._pose_mode_btn.setChecked(False)
+            self._pose_panel.setVisible(False)
+
         self._calib_panel.setVisible(True)
         self._update_calib_counter()
         self._reset_detection_labels()
@@ -1587,6 +1713,11 @@ class CaptureTab(QWidget):
         self._pose_last_conf_3d = None
 
         self._pose_active = True
+        # Reveal the inline 3D viewer next to the camera previews and frame
+        # it on the volume where a standing person typically appears (~2 m
+        # in front of left camera).  User can still orbit / zoom with the mouse.
+        self._preview_3d.setVisible(True)
+        self._preview_3d.setup_live_view()
         self._pose_status_label.setText(
             "Tracking — waiting for first frame…"
         )
@@ -1606,6 +1737,13 @@ class CaptureTab(QWidget):
         # Clear overlays so the preview stops showing stale 2D landmarks.
         self._pose_last_kp_l = None
         self._pose_last_kp_r = None
+        # Hide the inline 3D viewer so it gives space back to the camera previews.
+        self._preview_3d.clear()
+        self._preview_3d.setVisible(False)
+        # Close the fullscreen 3D pop-out if it's open — it would otherwise
+        # keep showing the last (now-stale) frame.
+        if self._fs_3d is not None:
+            self._fs_3d.close()
 
     @staticmethod
     def _pose_detect_pair(backend, frame_l: np.ndarray, frame_r: np.ndarray):
@@ -1644,6 +1782,7 @@ class CaptureTab(QWidget):
             calib["R"], calib["T"],
             min_conf=float(self._pose_min_conf_spin.value()),
             max_reproj_err=float(self._pose_max_reproj_spin.value()),
+            lens_model=calib.get("lens_model", "standard"),
         )
 
         # OneEuro smoothing — lazy-init filters on first frame (sized to the
@@ -1660,8 +1799,11 @@ class CaptureTab(QWidget):
         self._pose_last_3d = joints3d
         self._pose_last_conf_3d = conf3d
 
-        # Push to the 3D viewer.
-        self._pose_3d_view.set_frame(joints3d, conf3d)
+        # Push to the inline 3D viewer (next to the camera previews) and to
+        # the fullscreen pop-out if it's currently open.
+        self._preview_3d.set_frame(joints3d, conf3d)
+        if self._fs_3d is not None:
+            self._fs_3d.set_frame(joints3d, conf3d)
 
         # Metrics readout.
         n_valid = int((conf3d > 0).sum())
@@ -2343,6 +2485,7 @@ class CaptureTab(QWidget):
                 serial_right=serial_r,
                 fps=self._fps_spin.value(),
                 exposure_us=self._exposure_spin.value(),
+                gain_db=self._gain_spin.value(),
                 sync=self._sync_check.isChecked(),
                 primary="left" if self._primary_left.isChecked() else "right",
             )

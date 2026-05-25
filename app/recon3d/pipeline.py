@@ -66,6 +66,7 @@ def reconstruct3d(
     K1, D1 = calib["K1"], calib["D1"]
     K2, D2 = calib["K2"], calib["D2"]
     R, T = calib["R"], calib["T"]
+    fisheye = (calib.get("lens_model", "standard") == "fisheye")
 
     if progress_cb:
         progress_cb(5, "Loading 2D poses…")
@@ -147,8 +148,8 @@ def reconstruct3d(
             c_r = conf_right[t, p]  # [17]
 
             # Undistort → normalized camera coordinates
-            pts_l_norm = undistort_points(pts_l, K1, D1)  # [17, 2]
-            pts_r_norm = undistort_points(pts_r, K2, D2)  # [17, 2]
+            pts_l_norm = undistort_points(pts_l, K1, D1, fisheye=fisheye)  # [17, 2]
+            pts_r_norm = undistort_points(pts_r, K2, D2, fisheye=fisheye)  # [17, 2]
 
             # Triangulate
             pts3d = triangulate_points_dlt(
@@ -159,8 +160,8 @@ def reconstruct3d(
             )  # [17, 3]
 
             # Reprojection error in original pixel coordinates
-            err_l = reprojection_error(pts3d, K1, D1, R1, t1, pts_l)
-            err_r = reprojection_error(pts3d, K2, D2, R, t2, pts_r)
+            err_l = reprojection_error(pts3d, K1, D1, R1, t1, pts_l, fisheye=fisheye)
+            err_r = reprojection_error(pts3d, K2, D2, R, t2, pts_r, fisheye=fisheye)
             err_mean = (err_l + err_r) * 0.5  # [17]
 
             # Outlier rejection mask

@@ -77,9 +77,12 @@ class MainWindow(QMainWindow):
         self._recon_tab = ReconTab()
         self._capture_tab = CaptureTab()
 
+        # Live Capture first — it's the primary workflow (calibrate live, then
+        # track live).  The offline Calibration / Reconstruction tabs remain
+        # available for processing pre-recorded videos.
+        self._tabs.addTab(self._capture_tab, "Live Capture")
         self._tabs.addTab(self._calib_tab, "Calibration")
         self._tabs.addTab(self._recon_tab, "Reconstruction / 3D View")
-        self._tabs.addTab(self._capture_tab, "Live Capture")
         self.setCentralWidget(self._tabs)
 
         # Wire signals between tabs
@@ -133,7 +136,9 @@ class MainWindow(QMainWindow):
         pose3d = proj / "pose3d.npz"
         if pose3d.exists():
             self._recon_tab._load_pose3d(str(pose3d))
-            self._tabs.setCurrentIndex(1)  # Switch to reconstruction tab
+            # Switch to the Reconstruction tab by widget reference (not a hard
+            # coded index) so this stays correct if the tab order ever changes.
+            self._tabs.setCurrentWidget(self._recon_tab)
             self._status.showMessage(f"Loaded cached pose3d: {pose3d.name}")
 
     # ------------------------------------------------------------------

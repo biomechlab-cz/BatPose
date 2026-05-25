@@ -10,23 +10,36 @@ def undistort_points(
     pts: np.ndarray,
     K: np.ndarray,
     D: np.ndarray,
+    fisheye: bool = False,
 ) -> np.ndarray:
     """
     Undistort 2D pixel points and normalize by the camera matrix.
 
-    Equivalent to: cv2.undistortPoints(pts, K, D, P=None)
     Returns points in normalized camera coordinates (not pixels).
 
+    CRITICAL: the distortion model must match the one used at calibration.
+    A fisheye calibration stores 4 θ-based coefficients; feeding those to the
+    pinhole cv2.undistortPoints (which reads them as [k1,k2,p1,p2]) produces
+    wildly wrong rays and triangulated points with reprojection errors in the
+    thousands of pixels.  Pass fisheye=True for fisheye calibrations.
+
     Args:
-        pts: [N, 2] float32/float64 pixel coordinates
-        K:   [3, 3] camera intrinsic matrix
-        D:   distortion coefficients
+        pts:     [N, 2] float32/float64 pixel coordinates
+        K:       [3, 3] camera intrinsic matrix
+        D:       distortion coefficients (5/8 for pinhole, 4 for fisheye)
+        fisheye: use cv2.fisheye.undistortPoints instead of the pinhole model
 
     Returns:
         [N, 2] float64 normalized image coordinates
     """
     pts_in = pts.reshape(-1, 1, 2).astype(np.float64)
-    pts_out = cv2.undistortPoints(pts_in, K.astype(np.float64), D.astype(np.float64), P=None)
+    Kf = K.astype(np.float64)
+    Df = D.astype(np.float64)
+    if fisheye:
+        # fisheye D must be exactly 4 coefficients, shape (4,1) or (1,4).
+        pts_out = cv2.fisheye.undistortPoints(pts_in, Kf, Df.reshape(4, 1))
+    else:
+        pts_out = cv2.undistortPoints(pts_in, Kf, Df, P=None)
     return pts_out.reshape(-1, 2)
 
 
@@ -73,6 +86,7 @@ def triangulate_frame_pair(
     R:  np.ndarray, T:  np.ndarray,
     min_conf: float = 0.3,
     max_reproj_err: float = 20.0,
+    lens_model: str = "standard",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Triangulate one stereo frame of 2D keypoints into 3D.
 
@@ -86,11 +100,17 @@ def triangulate_frame_pair(
         K1, D1, K2, D2, R, T:  stereo calibration
         min_conf:        joints with either-view conf below this → conf3d=0
         max_reproj_err:  joints with reprojection err above this → conf3d=0
+        lens_model:      "fisheye" to undistort/reproject with the fisheye model;
+                         anything else uses the standard pinhole model.  MUST
+                         match the model used during calibration or the 3D
+                         output is garbage (reproj error in the thousands).
 
     Returns:
         (joints3d, conf3d, repro_err) — shapes [P, J, 3], [P, J], [P, J].
         joints3d entries for rejected joints are zeroed.
     """
+    fisheye = (lens_model == "fisheye")
+
     # Promote single-person to [1, J, …]
     if kp2d_l.ndim == 2:
         kp2d_l = kp2d_l[None]; kp2d_r = kp2d_r[None]
@@ -113,12 +133,12 @@ def triangulate_frame_pair(
         c_l   = conf_l[p]
         c_r   = conf_r[p]
 
-        pts_l_norm = undistort_points(pts_l, K1, D1)
-        pts_r_norm = undistort_points(pts_r, K2, D2)
+        pts_l_norm = undistort_points(pts_l, K1, D1, fisheye=fisheye)
+        pts_r_norm = undistort_points(pts_r, K2, D2, fisheye=fisheye)
         pts3d = triangulate_points_dlt(P1_norm, P2_norm, pts_l_norm, pts_r_norm)
 
-        err_l = reprojection_error(pts3d, K1, D1, R1, t1, pts_l)
-        err_r = reprojection_error(pts3d, K2, D2, R, t2, pts_r)
+        err_l = reprojection_error(pts3d, K1, D1, R1, t1, pts_l, fisheye=fisheye)
+        err_r = reprojection_error(pts3d, K2, D2, R, t2, pts_r, fisheye=fisheye)
         err_mean = (err_l + err_r) * 0.5
         valid = (c_l >= min_conf) & (c_r >= min_conf) & (err_mean <= max_reproj_err)
 
@@ -137,6 +157,7 @@ def reprojection_error(
     R: np.ndarray,
     t: np.ndarray,
     pts2d_observed: np.ndarray,
+    fisheye: bool = False,
 ) -> np.ndarray:
     """
     Compute per-point reprojection error in pixels.
@@ -148,6 +169,7 @@ def reprojection_error(
         R:             [3, 3] rotation matrix (world→camera)
         t:             [3] or [3, 1] translation vector
         pts2d_observed: [N, 2] observed 2D keypoints (original pixel coords)
+        fisheye:       use cv2.fisheye.projectPoints (must match calibration)
 
     Returns:
         err: [N] float32 per-point reprojection error (pixels)
@@ -155,13 +177,21 @@ def reprojection_error(
     rvec, _ = cv2.Rodrigues(R.astype(np.float64))
     tvec = t.reshape(3, 1).astype(np.float64)
 
-    proj, _ = cv2.projectPoints(
-        pts3d.astype(np.float64),
-        rvec,
-        tvec,
-        K.astype(np.float64),
-        D.astype(np.float64),
-    )  # [N, 1, 2]
+    if fisheye:
+        # fisheye.projectPoints is picky: object points must be (N,1,3) float64
+        # contiguous, distortion exactly 4 coeffs.
+        obj = np.ascontiguousarray(pts3d.reshape(-1, 1, 3), dtype=np.float64)
+        proj, _ = cv2.fisheye.projectPoints(
+            obj, rvec, tvec, K.astype(np.float64), D.astype(np.float64).reshape(4, 1),
+        )
+    else:
+        proj, _ = cv2.projectPoints(
+            pts3d.astype(np.float64),
+            rvec,
+            tvec,
+            K.astype(np.float64),
+            D.astype(np.float64),
+        )  # [N, 1, 2]
     proj = proj.reshape(-1, 2)
     err = np.linalg.norm(proj - pts2d_observed.astype(np.float64), axis=1)
     return err.astype(np.float32)

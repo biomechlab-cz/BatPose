@@ -21,6 +21,11 @@ class CaptureFrame:
     # The delta between the two values measures hardware sync quality.
     hw_timestamp_left_ns: int | None = None
     hw_timestamp_right_ns: int | None = None
+    # Cumulative dropped frames detected via hardware-timestamp gaps since start().
+    # A drop is counted when the gap between consecutive hw timestamps exceeds
+    # 1.5× the nominal frame period (i.e. at least one frame was skipped in the
+    # camera's NewestOnly buffer).  Always 0 for VideoSimulator.
+    dropped_frames: int = 0
 
     @property
     def hw_delta_us(self) -> float | None:

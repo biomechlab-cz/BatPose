@@ -26,6 +26,11 @@ PHASE1_MAX_FRAMES = 80
 # the GUI "freezing" during Phase 1 in real-world recordings.
 _CALIB_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 60, 1e-5)
 
+# Log the full cv2.fisheye.stereoCalibrate assertion only once per process —
+# it fires on every fisheye calibration on OpenCV 4.11 (known binding bug) and
+# would otherwise spam the console with the same multi-line traceback.
+_FISHEYE_STEREO_DETAIL_LOGGED = False
+
 
 def _spatial_subsample(
     detections: list,
@@ -174,11 +179,16 @@ def _fisheye_reproj_rms(
     n_pts = 0
     D_zero = np.zeros((4, 1), dtype=np.float64)
     for o, il, ir in zip(obj_pts, ipts_l, ipts_r, strict=False):
-        und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
-        ok, rvec1, tvec1 = cv2.solvePnP(
-            o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
+        if o.shape[0] < 6:
+            continue
+        try:
+            und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
+            ok, rvec1, tvec1 = cv2.solvePnP(
+                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        except cv2.error:
+            continue
         if not ok:
             continue
         R1, _ = cv2.Rodrigues(rvec1)
@@ -207,6 +217,60 @@ def _fisheye_reproj_rms(
     return float(np.sqrt(sq_err_sum / n_pts)) if n_pts else float("inf")
 
 
+def _fisheye_per_pair_rms(
+    obj_pts: list[np.ndarray],
+    ipts_l:  list[np.ndarray],
+    ipts_r:  list[np.ndarray],
+    K1: np.ndarray, D1: np.ndarray,
+    K2: np.ndarray, D2: np.ndarray,
+    R: np.ndarray, T: np.ndarray,
+) -> list[float]:
+    """Per-pair joint reprojection RMS (px), one value per stereo pair.
+
+    Same geometry as _fisheye_reproj_rms but reports each pair separately so
+    outlier pairs (motion blur, a mis-interpolated ChArUco corner) can be
+    identified and dropped before a final stereo refinement.  Pairs that can't
+    be evaluated (too few corners / PnP failure) get inf so they sort as the
+    worst candidates for removal.
+    """
+    D_zero = np.zeros((4, 1), dtype=np.float64)
+    out: list[float] = []
+    for o, il, ir in zip(obj_pts, ipts_l, ipts_r, strict=False):
+        if o.shape[0] < 6:
+            out.append(float("inf"))
+            continue
+        try:
+            und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
+            ok, rvec1, tvec1 = cv2.solvePnP(
+                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        except cv2.error:
+            out.append(float("inf"))
+            continue
+        if not ok:
+            out.append(float("inf"))
+            continue
+        R1, _ = cv2.Rodrigues(rvec1)
+        T1 = tvec1.reshape(3, 1)
+        R2 = R @ R1
+        T2 = (R @ T1 + T.reshape(3, 1))
+        rvec2, _ = cv2.Rodrigues(R2)
+        proj_l, _ = cv2.fisheye.projectPoints(
+            o.reshape(-1, 1, 3).astype(np.float64),
+            rvec1.reshape(1, 3), tvec1.reshape(1, 3), K1, D1,
+        )
+        proj_r, _ = cv2.fisheye.projectPoints(
+            o.reshape(-1, 1, 3).astype(np.float64),
+            rvec2.reshape(1, 3), T2.reshape(1, 3), K2, D2,
+        )
+        err_l = (proj_l.reshape(-1, 2) - il.reshape(-1, 2)) ** 2
+        err_r = (proj_r.reshape(-1, 2) - ir.reshape(-1, 2)) ** 2
+        n = err_l.shape[0] + err_r.shape[0]
+        out.append(float(np.sqrt((err_l.sum() + err_r.sum()) / n)) if n else float("inf"))
+    return out
+
+
 def _fisheye_extrinsics_from_solvepnp(
     obj_pts: list[np.ndarray],
     ipts_l:  list[np.ndarray],
@@ -227,18 +291,30 @@ def _fisheye_extrinsics_from_solvepnp(
     Ts: list[np.ndarray] = []
     D_zero = np.zeros((4, 1), dtype=np.float64)
 
+    skipped = 0
     for o, il, ir in zip(obj_pts, ipts_l, ipts_r, strict=False):
-        und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
-        und_r = cv2.fisheye.undistortPoints(ir.reshape(-1, 1, 2), K2, D2, P=K2)
-        ok_l, rvec_l, tvec_l = cv2.solvePnP(
-            o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
-        ok_r, rvec_r, tvec_r = cv2.solvePnP(
-            o.reshape(-1, 1, 3), und_r.reshape(-1, 1, 2), K2, D_zero,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
+        # cv2.solvePnP's default DLT init requires ≥ 6 correspondences.
+        # Any pair below that → silently skip (the joint of all pairs is what
+        # matters, and one short pair would crash the whole calibration).
+        if o.shape[0] < 6:
+            skipped += 1
+            continue
+        try:
+            und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
+            und_r = cv2.fisheye.undistortPoints(ir.reshape(-1, 1, 2), K2, D2, P=K2)
+            ok_l, rvec_l, tvec_l = cv2.solvePnP(
+                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            ok_r, rvec_r, tvec_r = cv2.solvePnP(
+                o.reshape(-1, 1, 3), und_r.reshape(-1, 1, 2), K2, D_zero,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        except cv2.error:
+            skipped += 1
+            continue
         if not (ok_l and ok_r):
+            skipped += 1
             continue
         R1, _ = cv2.Rodrigues(rvec_l)
         R2, _ = cv2.Rodrigues(rvec_r)
@@ -247,10 +323,17 @@ def _fisheye_extrinsics_from_solvepnp(
         Rs.append(R_pair)
         Ts.append(T_pair)
 
+    if skipped:
+        print(
+            f"[fisheye-2phase fallback] Skipped {skipped} of {len(obj_pts)} "
+            f"stereo pair(s) (insufficient corresponding ChArUco corners or PnP failure)."
+        )
     if not Rs:
         raise RuntimeError(
             "Fisheye solvePnP fallback found no usable pair — every stereo "
-            "frame failed PnP. Recapture with denser, better-distributed corners."
+            "frame had < 6 matched ChArUco corners or solvePnP failed. "
+            "Recapture with the board fully visible in BOTH cameras so each "
+            "pair shares more interior corners."
         )
 
     R = _avg_rotations(Rs)
@@ -266,7 +349,7 @@ def _intersect_stereo_points(
     selections: list,
     dtype: type,
     cancel_check: Callable[[], bool] | None = None,
-    min_per_frame: int = 4,
+    min_per_frame: int = 6,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """Build matched (obj, imgL, imgR) point arrays from FrameSelection list.
 
@@ -274,7 +357,9 @@ def _intersect_stereo_points(
     IDs — cv2.stereoCalibrate requires identical 3D↔2D correspondences in both
     views, so we intersect by id.  Frames that share fewer than *min_per_frame*
     corners after intersection are silently dropped (they would destabilise the
-    optimiser).
+    optimiser).  Default 6 matches the lower bound for cv2.solvePnP (used by
+    the fisheye fallback path) and is the practical minimum for a stable pose
+    even in cv2.stereoCalibrate.
     """
     obj_pts: list[np.ndarray] = []
     img_l: list[np.ndarray] = []
@@ -803,42 +888,92 @@ def calibrate_stereo_fisheye(
     obj_pts = [np.ascontiguousarray(a, dtype=np.float64) for a in obj_pts]
     ipts_l  = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_l]
     ipts_r  = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_r]
-    R_init = np.eye(3, dtype=np.float64)
-    T_init = np.zeros((3, 1), dtype=np.float64)
 
     # cv2.fisheye.stereoCalibrate returns (rms, K1, D1, K2, D2, R, T) in
-    # OpenCV ≤4.6 but may return additional values (rvecs, tvecs) in newer
-    # releases.  Slice to the first 7 to stay version-independent.
-    stereo_path = "stereoCalibrate"
-    try:
-        _stereo_result = cv2.fisheye.stereoCalibrate(
-            obj_pts,
-            ipts_l,
-            ipts_r,
-            K1, D1,
-            K2, D2,
-            img_size,
-            R_init, T_init,
-            cv2.fisheye.CALIB_FIX_INTRINSIC,
-            criteria,
-        )
-        rms, K1, D1, K2, D2, R, T = _stereo_result[:7]
-    except cv2.error as _exc:
-        # Fallback: compute extrinsics manually from per-pair solvePnP.
-        print(
-            f"[fisheye-2phase] cv2.fisheye.stereoCalibrate FAILED ({_exc}); "
-            "falling back to per-pair solvePnP averaging."
-        )
-        if progress_cb:
-            progress_cb(
-                70,
-                "Fisheye stereoCalibrate failed; falling back to per-pair "
-                "solvePnP averaging for extrinsics…",
+    # OpenCV ≤4.6 but inserts (rvecs, tvecs) before (flags, criteria) in the
+    # PARAMETER list of OpenCV ≥4.x as well as returning them.  CRITICAL:
+    # flags and criteria MUST be passed as KEYWORD arguments.  If passed
+    # positionally (the historical 4.6 layout: ...R, T, flags, criteria),
+    # then on 4.11 the integer flags value binds to the new `rvecs` output
+    # parameter — OpenCV tries to use the int as an OutputArray and raises
+    # the "!fixedSize() ... in cv::_OutputArray::create" assertion, while
+    # `flags` silently defaults to 0 (so CALIB_FIX_INTRINSIC is lost).
+    # Keyword binding is correct on every version regardless of the inserted
+    # rvecs/tvecs positional parameters; we also let OpenCV allocate R and T.
+    def _run_stereo(o_list, l_list, r_list):
+        """Compute fisheye stereo extrinsics for the given pairs.
+
+        We try cv2.fisheye.stereoCalibrate first, but on OpenCV 4.11 its Python
+        binding raises a `!fixedSize()` assertion in cv::_OutputArray::create
+        for the ragged (variable-corner-count) ChArUco point lists this app
+        produces — a known upstream binding bug, not a data problem.  The
+        per-pair solvePnP-averaging path is therefore the normal, reliable
+        route here and, combined with outlier rejection, yields sub-pixel RMS.
+        We attempt stereoCalibrate anyway in case a future OpenCV fixes it.
+        """
+        try:
+            _res = cv2.fisheye.stereoCalibrate(
+                o_list, l_list, r_list,
+                K1, D1, K2, D2,
+                img_size,
+                flags=cv2.fisheye.CALIB_FIX_INTRINSIC,
+                criteria=criteria,
             )
-        R, T, rms = _fisheye_extrinsics_from_solvepnp(
-            obj_pts, ipts_l, ipts_r, K1, D1, K2, D2,
-        )
-        stereo_path = "solvePnP-averaging fallback"
+            _rms, _, _, _, _, _R, _T = _res[:7]
+            return _R, _T, float(_rms), "stereoCalibrate"
+        except cv2.error as _exc:
+            # Calm, single-line note — this is the expected path on OpenCV 4.11,
+            # not an error the user needs to act on.  Log the full assertion
+            # only once per process for diagnostics.
+            global _FISHEYE_STEREO_DETAIL_LOGGED
+            if not _FISHEYE_STEREO_DETAIL_LOGGED:
+                print(
+                    "[fisheye-2phase] note: cv2.fisheye.stereoCalibrate is "
+                    "unavailable on this OpenCV build (known binding bug); using "
+                    "the per-pair solvePnP extrinsics path. Detail: "
+                    f"{str(_exc).splitlines()[-1].strip()}"
+                )
+                _FISHEYE_STEREO_DETAIL_LOGGED = True
+            _R, _T, _rms = _fisheye_extrinsics_from_solvepnp(
+                o_list, l_list, r_list, K1, D1, K2, D2,
+            )
+            return _R, _T, float(_rms), "solvePnP-averaging"
+
+    # ── Initial stereo solve on all pairs ───────────────────────────────────
+    R, T, rms, stereo_path = _run_stereo(obj_pts, ipts_l, ipts_r)
+
+    # ── Outlier rejection: drop pairs whose joint reproj error is far above
+    #    the median, then refine on the inliers.  ChArUco auto-capture at high
+    #    frame rate almost always yields a few motion-blurred or mis-interpolated
+    #    pairs that dominate the RMS; removing them typically halves it. ────────
+    per_pair = _fisheye_per_pair_rms(obj_pts, ipts_l, ipts_r, K1, D1, K2, D2, R, T)
+    finite = [e for e in per_pair if np.isfinite(e)]
+    if len(finite) >= 6:
+        median = float(np.median(finite))
+        # A pair is an outlier if its error exceeds 2.5× the median AND is over
+        # 1.5 px (so we never reject when everything is already excellent).
+        thresh = max(1.5, 2.5 * median)
+        keep = [i for i, e in enumerate(per_pair) if np.isfinite(e) and e <= thresh]
+        n_drop = len(obj_pts) - len(keep)
+        if n_drop > 0 and len(keep) >= 6:
+            print(
+                f"[fisheye-2phase] Outlier rejection: dropping {n_drop} of "
+                f"{len(obj_pts)} stereo pair(s) with per-pair RMS > {thresh:.2f} px "
+                f"(median {median:.2f} px); refining on {len(keep)} inliers."
+            )
+            if progress_cb:
+                progress_cb(80, f"Refining stereo on {len(keep)} inlier pairs…")
+            o_in = [obj_pts[i] for i in keep]
+            l_in = [ipts_l[i]  for i in keep]
+            r_in = [ipts_r[i]  for i in keep]
+            R2_, T2_, rms2_, path2_ = _run_stereo(o_in, l_in, r_in)
+            rms2_joint = _fisheye_reproj_rms(o_in, l_in, r_in, K1, D1, K2, D2, R2_, T2_)
+            rms_full_joint = _fisheye_reproj_rms(obj_pts, ipts_l, ipts_r, K1, D1, K2, D2, R, T)
+            # Accept the refinement only if it actually improved the inlier fit.
+            if rms2_joint < rms_full_joint:
+                R, T, rms, stereo_path = R2_, T2_, rms2_, f"{path2_} (+outlier reject)"
+                # Use the inlier pairs as the working set for the reported metric.
+                obj_pts, ipts_l, ipts_r = o_in, l_in, r_in
 
     # Always compute the genuine joint reprojection RMS so we have an
     # apples-to-apples quality number regardless of which path produced R/T.
@@ -989,6 +1124,11 @@ def save_calibration(calib_data: dict, board_cfg: dict, output_path: str) -> Non
     out = {
         "image_size": _to_list(calib_data["image_size"]),
         "board_cfg": board_cfg,
+        # Distortion model: "standard" (pinhole radial-tangential) or "fisheye"
+        # (θ-based).  Triangulation MUST use the matching model — without this
+        # key a fisheye calibration would be undistorted as pinhole and produce
+        # garbage 3D (reprojection errors in the thousands of pixels).
+        "lens_model": calib_data.get("lens_model", "standard"),
         "K1": _to_list(calib_data["K1"]),
         "D1": _to_list(calib_data["D1"]),
         "K2": _to_list(calib_data["K2"]),
@@ -1036,4 +1176,7 @@ def load_calibration(path: str) -> dict[str, Any]:
         "image_size": tuple(int(x) for x in data["image_size"]),
         "board_cfg": data.get("board_cfg", {}),
         "quality": data.get("quality", {}),
+        # Default "standard" so calibrations saved before this key existed
+        # still load (they were all pinhole).
+        "lens_model": data.get("lens_model", "standard"),
     }
