@@ -16,6 +16,7 @@ import statistics
 import time
 from collections import deque
 from concurrent.futures import Future as _Future, ThreadPoolExecutor as _ThreadPool
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -385,7 +386,9 @@ class CaptureTab(QWidget):
         self._sim_loop.setChecked(bool(state.get("sim_loop", False)))
         if out := state.get("out_folder"):
             self._out_edit.setText(out)
-        if prefix := state.get("prefix"):
+        # Restore a custom prefix, but treat the legacy "session" default as
+        # empty so older sessions adopt the new auto-timestamp naming.
+        if (prefix := state.get("prefix")) and prefix != "session":
             self._prefix_edit.setText(prefix)
 
         self._refresh_state()
@@ -607,7 +610,13 @@ class CaptureTab(QWidget):
         row_out = QHBoxLayout()
         row_out.addWidget(self._out_edit)
         row_out.addWidget(btn_out)
-        self._prefix_edit = QLineEdit("session")
+        self._prefix_edit = QLineEdit()
+        self._prefix_edit.setPlaceholderText("auto: YYYYMMDD_HHMMSS (leave empty)")
+        self._prefix_edit.setToolTip(
+            "Filename prefix for the recorded pair and timestamp sidecar.\n"
+            "Leave empty to auto-name each recording with the start time, e.g.\n"
+            "20260126_143512_left.avi / _right.avi / _timestamps.csv."
+        )
         out_form.addRow("Output folder:", row_out)
         out_form.addRow("File prefix:", self._prefix_edit)
         ctrl_layout.addWidget(out_group)
@@ -1293,7 +1302,9 @@ class CaptureTab(QWidget):
             return
         if checked:
             out_folder = self._out_edit.text().strip() or "capture"
-            prefix = self._prefix_edit.text().strip() or "session"
+            # Default to a start-time stamp so successive recordings don't
+            # overwrite each other: YYYYMMDD_HHMMSS_{left,right,timestamps}.
+            prefix = self._prefix_edit.text().strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
             Path(out_folder).mkdir(parents=True, exist_ok=True)
             out_l = str(Path(out_folder) / f"{prefix}_left.avi")
             out_r = str(Path(out_folder) / f"{prefix}_right.avi")

@@ -217,15 +217,35 @@ class CaptureWorker(_BaseWorker):
     def end_recording(self) -> None:
         self._do_record = False
 
+    @staticmethod
+    def _timestamps_path(out_left: str, out_right: str) -> str:
+        """Derive the sidecar CSV path (e.g. '…/session_timestamps.csv')."""
+        import os
+
+        base = os.path.commonprefix([out_left, out_right]).rstrip("_")
+        return f"{base}_timestamps.csv"
+
     def _run(self) -> Any:
         import cv2 as cv
 
         self._source.start()
         writer_l: Any = None
         writer_r: Any = None
+        ts_file: Any = None       # sidecar CSV handle, open only while recording
         was_recording = False
         frame_idx = 0
+        rec_idx = 0               # frames written to the current recording
         preview_stride = max(1, round(self._source.fps / 15))
+
+        def _close_writers() -> None:
+            nonlocal writer_l, writer_r, ts_file
+            if writer_l is not None:
+                writer_l.release()
+            if writer_r is not None:
+                writer_r.release()
+            if ts_file is not None:
+                ts_file.close()
+            writer_l = writer_r = ts_file = None
 
         try:
             while not self._cancelled:
@@ -242,29 +262,45 @@ class CaptureWorker(_BaseWorker):
                     fourcc = cv.VideoWriter_fourcc(*"MJPG")
                     writer_l = cv.VideoWriter(self._out_left, fourcc, self._source.fps, (w, h))
                     writer_r = cv.VideoWriter(self._out_right, fourcc, self._source.fps, (w, h))
+                    # Per-frame hardware-timestamp log so the pair can be
+                    # sync-verified after the fact.  Columns: the written frame
+                    # index, the left/right camera hardware timestamps (ns, from
+                    # each camera's clock), and their absolute difference (µs).
+                    ts_file = open(
+                        self._timestamps_path(self._out_left, self._out_right),
+                        "w", encoding="utf-8", newline="",
+                    )
+                    ts_file.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
+                    rec_idx = 0
                     was_recording = True
 
                 # Transition: recording → idle
                 if not self._do_record and was_recording:
-                    writer_l.release()
-                    writer_r.release()
-                    writer_l = writer_r = None
+                    _close_writers()
                     was_recording = False
                     self.recording_finished.emit(self._out_left, self._out_right)
 
                 if was_recording:
                     writer_l.write(frame.frame_left)
                     writer_r.write(frame.frame_right)
+                    tl = frame.hw_timestamp_left_ns
+                    tr = frame.hw_timestamp_right_ns
+                    delta = frame.hw_delta_us
+                    ts_file.write(
+                        f"{rec_idx},"
+                        f"{'' if tl is None else tl},"
+                        f"{'' if tr is None else tr},"
+                        f"{'' if delta is None else f'{delta:.3f}'}\n"
+                    )
+                    rec_idx += 1
 
                 frame_idx += 1
                 self._progress(0, f"Frame {frame.frame_index}  {frame.timestamp:.1f} s")
 
         finally:
-            if writer_l is not None:
-                writer_l.release()
-            if writer_r is not None:
-                writer_r.release()
-            if was_recording:
+            already = was_recording
+            _close_writers()
+            if already:
                 self.recording_finished.emit(self._out_left, self._out_right)
             self._source.stop()
 

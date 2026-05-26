@@ -78,11 +78,12 @@ class MainWindow(QMainWindow):
         self._capture_tab = CaptureTab()
 
         # Live Capture first — it's the primary workflow (calibrate live, then
-        # track live).  The offline Calibration / Reconstruction tabs remain
-        # available for processing pre-recorded videos.
+        # track live).  Reconstruction comes next as it's used more often than
+        # offline Calibration (calibration is typically done during live
+        # capture); offline Calibration stays last for pre-recorded videos.
         self._tabs.addTab(self._capture_tab, "Live Capture")
-        self._tabs.addTab(self._calib_tab, "Calibration")
         self._tabs.addTab(self._recon_tab, "Reconstruction / 3D View")
+        self._tabs.addTab(self._calib_tab, "Calibration")
         self.setCentralWidget(self._tabs)
 
         # Wire signals between tabs
