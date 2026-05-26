@@ -16,12 +16,6 @@ build/
 # Large test data files (videos, etc.) — keep local only
 data/
 
-# QA / HITL / UX reports — kept local
-reports/
-
-# Agent-specific instructions — not shared
-CLAUDE.md
-
 # Vendored third-party wheels (PySpin / spinnaker-python — license forbids redistribution)
 external/
 
