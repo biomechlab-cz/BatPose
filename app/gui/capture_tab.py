@@ -20,7 +20,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -253,7 +253,15 @@ class CaptureTab(QWidget):
         # ── Live Pose Tracking state ───────────────────────────────────────
         # Mutually exclusive with calibration mode (toggling one closes the other).
         self._pose_active: bool = False
-        self._pose_backend = None              # PoseBackend instance
+        # SEPARATE VIDEO-mode landmarker per camera.  VIDEO mode keeps a temporal
+        # track that sustains detection through frames the one-shot detector
+        # would miss (it detects far more reliably than stateless IMAGE mode).
+        # A single VIDEO tracker can't be shared across the two views (alternating
+        # frames corrupt its track), so each camera gets its own instance — these
+        # do NOT interfere (verified).  The harder of the two views needs a lower
+        # detection-confidence threshold to get its initial lock (see _POSE_CONF).
+        self._pose_backend = None              # left-camera PoseBackend
+        self._pose_backend_r = None            # right-camera PoseBackend
         self._pose_calib: dict | None = None   # loaded calibration.yml as dict
         # Single in-flight pose-detection future, mirrors the ChArUco pattern.
         self._pose_future: _Future | None = None
@@ -1375,6 +1383,7 @@ class CaptureTab(QWidget):
             if (
                 self._pose_future is None
                 and self._pose_backend is not None
+                and self._pose_backend_r is not None
                 and not self._pool_shutdown
             ):
                 fl = frame.frame_left.copy()
@@ -1383,7 +1392,8 @@ class CaptureTab(QWidget):
                 self._pose_submitted_fr = fr
                 try:
                     self._pose_future = self._detect_pool.submit(
-                        CaptureTab._pose_detect_pair, self._pose_backend, fl, fr,
+                        CaptureTab._pose_detect_pair,
+                        self._pose_backend, self._pose_backend_r, fl, fr,
                     )
                 except RuntimeError:
                     self._pool_shutdown = True
@@ -1452,15 +1462,22 @@ class CaptureTab(QWidget):
             return
         dlg = _Fullscreen3DSkeleton(parent=self)
         dlg.finished.connect(self._on_fullscreen_3d_closed)
-        # Use the same view defaults the inline preview was configured with
-        # so the user lands on a sensible framing immediately.
-        dlg.viewer.setup_live_view()
-        # Seed with the most recent pose so we don't show an empty grid for
-        # a tick.
-        if self._pose_last_3d is not None and self._pose_last_conf_3d is not None:
-            dlg.set_frame(self._pose_last_3d, self._pose_last_conf_3d)
         self._fs_3d = dlg
+        # Show FIRST so the GLViewWidget's OpenGL context is created.  Building
+        # or updating GL items (setup_live_view / set_frame) before the context
+        # exists yields undrawable items → "Error while drawing item" + a blank
+        # canvas.  Defer configuration to the next event-loop tick so the show
+        # (and its initializeGL) has fully completed.
         dlg.showFullScreen()
+
+        def _configure(d=dlg):
+            if self._fs_3d is not d:
+                return  # closed again before the tick fired
+            d.viewer.setup_live_view()
+            if self._pose_last_3d is not None and self._pose_last_conf_3d is not None:
+                d.set_frame(self._pose_last_3d, self._pose_last_conf_3d)
+
+        QTimer.singleShot(0, _configure)
 
     def _on_fullscreen_3d_closed(self, _result: int = 0) -> None:
         self._fs_3d = None
@@ -1701,7 +1718,19 @@ class CaptureTab(QWidget):
         # within the worker thread.  MediaPipe is fast enough on CPU for live use.
         from app.pose2d.mediapipe_backend import MediaPipeBackend  # noqa: PLC0415
         n_poses = int(self._pose_num_spin.value())
-        self._pose_backend = MediaPipeBackend(num_poses=n_poses)
+        # One VIDEO-mode landmarker per camera.  Confidence is lowered to 0.3:
+        # at the default 0.5 the harder camera view often fails to get its
+        # initial detection lock and shows no skeleton, while 0.3 lets both
+        # cameras lock reliably (measured) without spurious detections.
+        conf = 0.3
+        self._pose_backend = MediaPipeBackend(
+            num_poses=n_poses, running_mode="video",
+            min_detection_confidence=conf, min_tracking_confidence=conf,
+        )
+        self._pose_backend_r = MediaPipeBackend(
+            num_poses=n_poses, running_mode="video",
+            min_detection_confidence=conf, min_tracking_confidence=conf,
+        )
 
         # Drop any prior smoothing state so a fresh stream starts clean.
         self._pose_filters = None
@@ -1725,12 +1754,14 @@ class CaptureTab(QWidget):
     def _stop_pose_tracking(self) -> None:
         """Stop the live pose loop and release backend resources."""
         self._pose_active = False
-        if self._pose_backend is not None:
-            try:
-                self._pose_backend.close()
-            except Exception:
-                pass
+        for _bk in (self._pose_backend, self._pose_backend_r):
+            if _bk is not None:
+                try:
+                    _bk.close()
+                except Exception:
+                    pass
         self._pose_backend = None
+        self._pose_backend_r = None
         # Cancel any in-flight future result by discarding it on next tick.
         self._pose_future = None
         self._pose_status_label.setText("Idle")
@@ -1746,13 +1777,16 @@ class CaptureTab(QWidget):
             self._fs_3d.close()
 
     @staticmethod
-    def _pose_detect_pair(backend, frame_l: np.ndarray, frame_r: np.ndarray):
-        """Run pose detection on both frames (serial — MediaPipe isn't thread-safe).
+    def _pose_detect_pair(backend_l, backend_r, frame_l: np.ndarray, frame_r: np.ndarray):
+        """Run pose detection on both frames with per-camera VIDEO landmarkers.
 
+        Each camera has its OWN backend so its VIDEO-mode temporal track isn't
+        corrupted by the other view (see __init__ note).  Runs serially in one
+        worker thread — MediaPipe isn't thread-safe.
         Returns (kps_l, conf_l, kps_r, conf_r) with shapes [P,17,2] / [P,17].
         """
-        kps_l, conf_l = backend.detect(frame_l)
-        kps_r, conf_r = backend.detect(frame_r)
+        kps_l, conf_l = backend_l.detect(frame_l)
+        kps_r, conf_r = backend_r.detect(frame_r)
         return kps_l, conf_l, kps_r, conf_r
 
     def _process_pose_result(

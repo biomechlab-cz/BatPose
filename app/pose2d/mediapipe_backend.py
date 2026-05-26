@@ -13,27 +13,34 @@ from .base import PoseBackend
 # MediaPipe-33 index → COCO-17 index mapping (from docs/skeleton_mapping.md)
 MP_TO_COCO17: list[int] = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
 
-_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "pose_landmarker/pose_landmarker_full/float16/1/"
-    "pose_landmarker_full.task"
-)
-_MODEL_CACHE = Path.home() / ".cache" / "wt-app" / "pose_landmarker_full.task"
+# Pose Landmarker variants.  "heavy" is the most accurate (best for wide stereo
+# vergence where landmark precision matters most) at higher CPU cost; "full" is
+# the balanced default; "lite" is fastest/least accurate.
+_MODEL_BASE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker"
+_MODELS: dict[str, str] = {
+    "lite":  f"{_MODEL_BASE}/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    "full":  f"{_MODEL_BASE}/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+    "heavy": f"{_MODEL_BASE}/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+}
+_CACHE_DIR = Path.home() / ".cache" / "wt-app"
 
 
-def _ensure_model(cache_path: Path = _MODEL_CACHE) -> str:
-    """Return path to cached model file, downloading if necessary."""
+def _ensure_model(complexity: str = "full") -> str:
+    """Return path to the cached model for *complexity*, downloading if needed."""
+    complexity = complexity if complexity in _MODELS else "full"
+    url = _MODELS[complexity]
+    cache_path = _CACHE_DIR / f"pose_landmarker_{complexity}.task"
     if cache_path.exists():
         return str(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading MediaPipe model → {cache_path}", flush=True)
+    print(f"Downloading MediaPipe '{complexity}' model -> {cache_path}", flush=True)
 
     def _reporthook(count: int, block_size: int, total_size: int) -> None:
         if total_size > 0:
             pct = min(100, int(count * block_size * 100 / total_size))
             print(f"\r  {pct}%", end="", flush=True)
 
-    urllib.request.urlretrieve(_MODEL_URL, cache_path, reporthook=_reporthook)
+    urllib.request.urlretrieve(url, cache_path, reporthook=_reporthook)
     print(" done", flush=True)
     return str(cache_path)
 
@@ -57,6 +64,7 @@ class MediaPipeBackend(PoseBackend):
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         model_path: str | None = None,
+        running_mode: str = "video",
     ):
         import mediapipe as mp
         from mediapipe.tasks import python
@@ -66,13 +74,20 @@ class MediaPipeBackend(PoseBackend):
         self._num_poses = num_poses
         self._fps: float = 30.0
         self._frame_idx: int = 0
+        # "video" → detect_for_video (temporal tracking; correct for a single
+        #           continuous stream, e.g. the offline pipeline).
+        # "image" → detect (stateless per-frame).  Use this for LIVE stereo:
+        #           two camera streams can't share a VIDEO-mode tracker, and
+        #           multiple VIDEO-mode landmarkers interfere in one process.
+        self._image_mode = (running_mode == "image")
 
         if model_path is None:
-            model_path = _ensure_model()
+            model_path = _ensure_model(model_complexity)
 
+        rm = vision.RunningMode.IMAGE if self._image_mode else vision.RunningMode.VIDEO
         options = vision.PoseLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=model_path),
-            running_mode=vision.RunningMode.VIDEO,
+            running_mode=rm,
             num_poses=num_poses,
             min_pose_detection_confidence=min_detection_confidence,
             min_pose_presence_confidence=min_detection_confidence,
@@ -94,10 +109,12 @@ class MediaPipeBackend(PoseBackend):
             image_format=mp.ImageFormat.SRGB,
             data=frame_rgb,
         )
-        timestamp_ms = int(self._frame_idx * 1000.0 / self._fps)
-        self._frame_idx += 1
-
-        result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+        if self._image_mode:
+            result = self._landmarker.detect(mp_image)
+        else:
+            timestamp_ms = int(self._frame_idx * 1000.0 / self._fps)
+            self._frame_idx += 1
+            result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
 
         pose_lms_list = result.pose_landmarks or []
         n_persons = max(1, len(pose_lms_list))
