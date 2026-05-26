@@ -46,11 +46,6 @@
          left arm swings forward; left leg extends back while the right arm
          swings back.  Torso leans forward. -->
     <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
-      <!-- spine + neck (green) -->
-      <g stroke="#43e08a" stroke-width="22">
-        <path d="M532 392 L478 574"/>     <!-- spine (forward lean) -->
-        <path d="M532 392 L558 364"/>     <!-- neck → head -->
-      </g>
       <!-- LEFT side (blue): arm swung FORWARD-up, leg extended BACK -->
       <g stroke="#3d8bff" stroke-width="22">
         <path d="M532 392 L510 400"/>          <!-- L clavicle -->
