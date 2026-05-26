@@ -1,4 +1,4 @@
-# wt-app
+# BatPose
 
 Stereo FLIR Calibration + 3D Human Pose Estimation (CPU-first).
 

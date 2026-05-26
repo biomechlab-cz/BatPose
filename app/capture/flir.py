@@ -29,7 +29,7 @@ import numpy as np
 from .base import BaseCapture, CaptureFrame
 
 # File-based logger so crashes leave a trace even when the process is killed.
-_log_path = Path.home() / ".config" / "wt-app" / "flir.log"
+_log_path = Path.home() / ".config" / "BatPose" / "flir.log"
 _log_path.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     filename=str(_log_path),

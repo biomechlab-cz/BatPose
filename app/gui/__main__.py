@@ -6,7 +6,7 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Launch the wt-app GUI."""
+    """Launch the BatPose GUI."""
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
@@ -18,9 +18,18 @@ def main(argv: list[str] | None = None) -> int:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
     app = QApplication(argv or sys.argv)
-    app.setApplicationName("wt-app")
+    app.setApplicationName("BatPose")
     app.setApplicationVersion("0.1.0")
-    app.setOrganizationName("wt")
+    app.setOrganizationName("BatPose")
+
+    # Application icon (title bar / taskbar).
+    from pathlib import Path
+
+    from PySide6.QtGui import QIcon
+
+    icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.svg"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     # Use fusion style for consistent look across platforms
     app.setStyle("Fusion")

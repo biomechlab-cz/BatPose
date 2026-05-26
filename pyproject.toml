@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "wt-app"
+name = "batpose"
 version = "0.1.0"
 description = "Stereo FLIR Calibration + 3D Human Pose Estimation"
 readme = "README.md"
@@ -42,10 +42,10 @@ dev = [
 # The app degrades gracefully to the video-simulator source when PySpin is absent.
 
 [project.scripts]
-wt-gui    = "app.gui.__main__:main"
-wt-calib  = "app.calib.__main__:main"
-wt-pose2d = "app.pose2d.__main__:main"
-wt-recon3d = "app.recon3d.__main__:main"
+batpose-gui     = "app.gui.__main__:main"
+batpose-calib   = "app.calib.__main__:main"
+batpose-pose2d  = "app.pose2d.__main__:main"
+batpose-recon3d = "app.recon3d.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

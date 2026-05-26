@@ -21,7 +21,7 @@ from .capture_tab import CaptureTab
 from .recon_tab import ReconTab
 from .welcome_dialog import WelcomeDialog
 
-_SESSION_FILE = Path.home() / ".config" / "wt-app" / "session.json"
+_SESSION_FILE = Path.home() / ".config" / "BatPose" / "session.json"
 
 
 class MainWindow(QMainWindow):
@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("wt-app  |  Stereo FLIR 3D Pose")
+        self.setWindowTitle("BatPose  |  Stereo FLIR 3D Pose")
         self.resize(1280, 800)
         self._project_dir: str | None = None
         self._setup_ui()
@@ -311,8 +311,8 @@ class MainWindow(QMainWindow):
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
-            "About wt-app",
-            "<b>wt-app</b> v0.1.0<br>"
+            "About BatPose",
+            "<b>BatPose</b> v0.1.0<br>"
             "Stereo FLIR Calibration + 3D Human Pose Estimation<br><br>"
             "CPU-first pipeline using:<br>"
             "• MediaPipe Pose Landmarker (COCO-17)<br>"

@@ -10,8 +10,8 @@
 
 ```bash
 # Clone the repo
-git clone <repo-url> wt-app
-cd wt-app
+git clone <repo-url> BatPose
+cd BatPose
 
 # Install with uv (recommended)
 uv pip install -e ".[dev]"
@@ -93,7 +93,7 @@ python -m app.pose2d \
 ```
 
 **First run note:** MediaPipe will download the `pose_landmarker_full.task` model (~28 MB)
-to `~/.cache/wt-app/` on first use.
+to `~/.cache/BatPose/` on first use.
 
 Output files:
 - `pose2d_left.npz`  — keypoints `[T, P, 17, 2]` + conf `[T, P, 17]`
@@ -200,7 +200,7 @@ On **File → Open Project**, the GUI auto-detects and loads these files.
 | Problem | Solution |
 |---------|---------|
 | High RMS (>2 px) | Check board flatness, improve lighting, use more frames with better coverage |
-| MediaPipe download fails | Set `http_proxy` / `https_proxy` or manually copy `pose_landmarker_full.task` to `~/.cache/wt-app/` |
+| MediaPipe download fails | Set `http_proxy` / `https_proxy` or manually copy `pose_landmarker_full.task` to `~/.cache/BatPose/` |
 | 3D joints scattered / noisy | Decrease `--min-cutoff` (more smoothing) or decrease `--beta` |
 | GUI freezes | Should not happen; if it does, file a bug — all heavy work runs in QThread |
 | `No valid paired frames found` | Board not detected: check board config, ensure board fills >30% of frame |

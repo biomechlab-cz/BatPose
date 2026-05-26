@@ -30,7 +30,7 @@ class WelcomeDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Welcome to wt-app")
+        self.setWindowTitle("Welcome to BatPose")
         self.setMinimumWidth(560)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         self._build_ui()

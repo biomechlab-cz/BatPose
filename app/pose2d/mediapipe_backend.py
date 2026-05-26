@@ -22,7 +22,7 @@ _MODELS: dict[str, str] = {
     "full":  f"{_MODEL_BASE}/pose_landmarker_full/float16/1/pose_landmarker_full.task",
     "heavy": f"{_MODEL_BASE}/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
 }
-_CACHE_DIR = Path.home() / ".cache" / "wt-app"
+_CACHE_DIR = Path.home() / ".cache" / "BatPose"
 
 
 def _ensure_model(complexity: str = "full") -> str:

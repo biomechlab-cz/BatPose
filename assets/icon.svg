@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#18222e"/>
+      <stop offset="1" stop-color="#0a0e13"/>
+    </linearGradient>
+    <radialGradient id="spot" cx="0.5" cy="0.46" r="0.55">
+      <stop offset="0" stop-color="#1f9e8c" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#1f9e8c" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="tile">
+      <rect x="40" y="40" width="944" height="944" rx="210" ry="210"/>
+    </clipPath>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="40" y="40" width="944" height="944" rx="210" ry="210" fill="url(#bg)"/>
+
+  <g clip-path="url(#tile)">
+    <!-- Depth: soft volume glow + perspective floor grid (stereo-3D cue) -->
+    <rect x="40" y="40" width="944" height="944" fill="url(#spot)"/>
+    <g stroke="#39d3c0" stroke-opacity="0.16" stroke-width="3" fill="none">
+      <!-- receding horizontal lines -->
+      <path d="M150 940 H874"/>
+      <path d="M214 884 H810"/>
+      <path d="M262 842 H762"/>
+      <path d="M298 810 H726"/>
+      <!-- converging verticals toward a high vanishing point -->
+      <path d="M150 940 L412 810"/>
+      <path d="M874 940 L612 810"/>
+      <path d="M362 940 L470 810"/>
+      <path d="M662 940 L554 810"/>
+      <path d="M512 940 L512 810"/>
+    </g>
+
+    <!-- Skeleton — mid-stride running pose (running to the right), with the
+         counter-rotation of a real gait: right leg drives forward+up while the
+         left arm swings forward; left leg extends back while the right arm
+         swings back.  Torso leans forward. -->
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+      <!-- spine + neck (green) -->
+      <g stroke="#43e08a" stroke-width="22">
+        <path d="M532 392 L478 574"/>     <!-- spine (forward lean) -->
+        <path d="M532 392 L558 364"/>     <!-- neck → head -->
+      </g>
+      <!-- LEFT side (blue): arm swung FORWARD-up, leg extended BACK -->
+      <g stroke="#3d8bff" stroke-width="22">
+        <path d="M532 392 L510 400"/>          <!-- L clavicle -->
+        <path d="M510 400 L606 430 L642 378"/> <!-- L arm forward, bent -->
+        <path d="M510 400 L456 578"/>          <!-- L torso side -->
+        <path d="M478 574 L456 578"/>          <!-- L pelvis -->
+        <path d="M456 578 L432 678 L398 792"/> <!-- L leg back, extended -->
+      </g>
+      <!-- RIGHT side (red): arm swung BACK, leg driving FORWARD-up -->
+      <g stroke="#ff5a5a" stroke-width="22">
+        <path d="M532 392 L556 386"/>          <!-- R clavicle -->
+        <path d="M556 386 L470 446 L430 500"/> <!-- R arm back, bent -->
+        <path d="M556 386 L500 570"/>          <!-- R torso side -->
+        <path d="M478 574 L500 570"/>          <!-- R pelvis -->
+        <path d="M500 570 L566 626 L556 706"/> <!-- R leg forward, knee up -->
+      </g>
+    </g>
+
+    <!-- Head (leaning forward) -->
+    <circle cx="566" cy="322" r="46" fill="none" stroke="#eaf2ff" stroke-width="20" filter="url(#glow)"/>
+
+    <!-- Joint markers -->
+    <g fill="#f2f6ff" filter="url(#glow)">
+      <circle cx="532" cy="392" r="13"/>                              <!-- neck -->
+      <circle cx="510" cy="400" r="13"/><circle cx="556" cy="386" r="13"/> <!-- shoulders -->
+      <circle cx="606" cy="430" r="13"/><circle cx="470" cy="446" r="13"/> <!-- elbows -->
+      <circle cx="642" cy="378" r="13"/><circle cx="430" cy="500" r="13"/> <!-- wrists -->
+      <circle cx="456" cy="578" r="13"/><circle cx="500" cy="570" r="13"/> <!-- hips -->
+      <circle cx="432" cy="678" r="13"/><circle cx="566" cy="626" r="13"/> <!-- knees -->
+      <circle cx="398" cy="792" r="13"/><circle cx="556" cy="706" r="13"/> <!-- ankles -->
+    </g>
+  </g>
+
+  <!-- subtle inner edge -->
+  <rect x="41.5" y="41.5" width="941" height="941" rx="208" ry="208"
+        fill="none" stroke="#5fe6d4" stroke-opacity="0.12" stroke-width="3"/>
+</svg>
