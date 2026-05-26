@@ -120,6 +120,8 @@ class SkeletonViewer3D(QWidget):
         # gesture for "pop out / fullscreen".
         self._glview.installEventFilter(self)
         self._glview.setToolTip("Click to view fullscreen · drag to orbit")
+        # Hand cursor for click-to-fullscreen, consistent with the camera previews.
+        self._glview.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Grid
         grid = gl.GLGridItem()
