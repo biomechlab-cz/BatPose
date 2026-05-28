@@ -275,6 +275,7 @@ class ReconTab(QWidget):
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
         ctrl_layout.addWidget(self._progress_bar)
 
         # Status log
@@ -369,6 +370,10 @@ class ReconTab(QWidget):
         splitter.setStretchFactor(1, 1)
 
         root_layout.addWidget(splitter)
+
+        # Initialise status indicators so they show ✗/red on an empty widget
+        # rather than appearing blank until the user first types something.
+        self._validate_inputs()
 
     # ------------------------------------------------------------------
     # File dialogs
@@ -570,7 +575,7 @@ class ReconTab(QWidget):
         # pipeline completes (or even mid-pipeline if pose2d finishes first).
         self._pose2d_left_path = out_left
         self._pose2d_right_path = out_right
-        backend_name = "mediapipe" if self._backend_combo.currentIndex() == 0 else "rtmpose"
+        backend_name = "rtmpose" if "rtmpose" in self._backend_combo.currentText().lower() else "mediapipe"
 
         self._log_msg(f"\nStep 1/2: Extracting 2D poses (backend={backend_name})…")
         self._run_btn.setEnabled(False)

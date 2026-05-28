@@ -63,3 +63,6 @@ ignore = ["E501"]
 testpaths = ["tests"]
 timeout = 120
 qt_api = "pyside6"
+markers = [
+    "manual: manual test requiring a human operator (deselect with -m 'not manual')",
+]

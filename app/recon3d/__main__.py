@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -41,9 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _write_csv(csv_path: str, joints3d, conf3d, fps: float) -> None:
-    """Write joints3d / conf3d arrays to a flat CSV file.
+    """Write joints3d / conf3d arrays to a flat CSV file plus a sidecar metadata JSON.
 
-    Columns: frame, time_s, person, j0_x, j0_y, j0_z, j0_conf, j1_x, ...
+    CSV columns: frame, time_s, person, j0_x, j0_y, j0_z, j0_conf, j1_x, ...
+    Metadata JSON: <csv_stem>_metadata.json with fps, coordinate_units, n_frames, n_joints.
     joints3d: [T, P, J, 3]   conf3d: [T, P, J]
     """
 
@@ -52,7 +54,8 @@ def _write_csv(csv_path: str, joints3d, conf3d, fps: float) -> None:
     for j in range(J):
         header += [f"j{j}_x", f"j{j}_y", f"j{j}_z", f"j{j}_conf"]
 
-    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+    csv_p = Path(csv_path)
+    csv_p.parent.mkdir(parents=True, exist_ok=True)
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(header)
@@ -65,6 +68,17 @@ def _write_csv(csv_path: str, joints3d, conf3d, fps: float) -> None:
                     c = conf3d[t, p, j]
                     row += [f"{x:.6f}", f"{y:.6f}", f"{z:.6f}", f"{c:.6f}"]
                 writer.writerow(row)
+
+    # Write sidecar metadata JSON alongside the CSV
+    meta_path = csv_p.with_name(csv_p.stem + "_metadata.json")
+    metadata = {
+        "fps": fps,
+        "coordinate_units": "meters",
+        "n_frames": T,
+        "n_persons": P,
+        "n_joints": J,
+    }
+    meta_path.write_text(json.dumps(metadata, indent=2))
 
 
 def _progress(pct: int, msg: str) -> None:

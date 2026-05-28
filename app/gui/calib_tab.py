@@ -392,6 +392,7 @@ class CalibTab(QWidget):
     def _on_cancel(self) -> None:
         if self._worker:
             self._worker.cancel()
+        self._cancel_btn.setEnabled(False)  # prevent repeated clicks
         self._log_msg("\nCancellation requested…")
 
     def _on_progress(self, pct: int, msg: str) -> None:
@@ -400,6 +401,7 @@ class CalibTab(QWidget):
             self._log_msg(msg)
 
     def _on_finished(self, result: object) -> None:
+        self._worker = None  # clear stale reference
         self._validate_inputs()  # re-enable Run only if fields are still valid
         self._cancel_btn.setEnabled(False)
 
@@ -479,8 +481,10 @@ class CalibTab(QWidget):
         self.calibration_saved.emit(out_path)
 
     def _on_error(self, msg: str) -> None:
+        self._worker = None  # clear stale reference
         self._validate_inputs()
         self._cancel_btn.setEnabled(False)
+        self._progress_bar.setValue(0)
         self._log_msg(f"\nError: {msg}")
 
         if "no valid paired frames" in msg.lower():

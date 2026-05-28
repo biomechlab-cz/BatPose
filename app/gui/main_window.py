@@ -126,19 +126,24 @@ class MainWindow(QMainWindow):
         self._capture_tab.set_project_dir(path)
 
     def _load_cached(self, project_dir: str) -> None:
-        """Auto-load cached results if present."""
+        """Auto-load cached results if present.
+
+        NOTE: set_project_dir() already auto-loads pose3d.npz and calibration
+        from the project folder.  This method only does the incremental work
+        that set_project_dir cannot do: switch the active tab and update the
+        status bar.  It avoids reloading files that are already loaded.
+        """
         proj = Path(project_dir)
 
         calib = proj / "calibration.yml"
         if calib.exists():
-            self._recon_tab.set_calibration(str(calib))
+            # set_project_dir already set the calib path; update status bar only.
             self._status.showMessage(f"Loaded cached calibration: {calib.name}")
 
         pose3d = proj / "pose3d.npz"
         if pose3d.exists():
-            self._recon_tab._load_pose3d(str(pose3d))
-            # Switch to the Reconstruction tab by widget reference (not a hard
-            # coded index) so this stays correct if the tab order ever changes.
+            # set_project_dir already loaded the file via _try_auto_load_pose3d.
+            # Only switch the active tab and update the status bar here.
             self._tabs.setCurrentWidget(self._recon_tab)
             self._status.showMessage(f"Loaded cached pose3d: {pose3d.name}")
 
