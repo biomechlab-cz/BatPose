@@ -2,7 +2,12 @@
 RTMPose-m backend via rtmlib (optional upgrade path — ADR-002).
 
 Install extras: pip install rtmlib onnxruntime
-Model files (~30 MB) are auto-downloaded by rtmlib to ~/.rtmlib/ on first use.
+Model files (~30-80 MB) are auto-downloaded by rtmlib to ~/.cache/rtmlib/ on
+first use.  Available modes (rtmlib Body presets):
+
+    lightweight  — YOLOX-tiny + RTMPose-s  (~30 MB total, fastest)
+    balanced     — YOLOX-m   + RTMPose-m  (~60 MB, recommended)
+    performance  — YOLOX-x   + RTMPose-x  (~80 MB, most accurate)
 """
 
 from __future__ import annotations
@@ -14,28 +19,33 @@ from .base import PoseBackend
 
 class RTMPoseBackend(PoseBackend):
     """
-    RTMPose-m backend.  Natively outputs COCO-17 — no remapping needed (ADR-002).
+    RTMPose backend via rtmlib.  Natively outputs COCO-17 — no remapping
+    needed (ADR-002).
 
-    Requires: pip install rtmlib onnxruntime
+    Requires: pip install rtmlib onnxruntime   (or: pip install -e ".[rtmpose]")
+
+    Args:
+        mode:   rtmlib Body preset — 'lightweight', 'balanced' (default),
+                or 'performance'.
+        device: 'cpu' (default) or 'cuda' if CUDA-capable onnxruntime is
+                installed.
     """
 
     name = "rtmpose_m"
 
     def __init__(
         self,
-        det_model: str = "human",
-        pose_model: str = "body",
-        mode: str = "performance",  # 'performance' or 'balanced'
+        mode: str = "balanced",
         device: str = "cpu",
     ):
         try:
             from rtmlib import Body
         except ImportError as e:
-            raise ImportError("rtmlib is not installed. Run: pip install rtmlib onnxruntime") from e
+            raise ImportError(
+                "rtmlib is not installed.  Run:  pip install rtmlib onnxruntime"
+            ) from e
 
         self._body = Body(
-            det=det_model,
-            pose=pose_model,
             mode=mode,
             device=device,
             backend="onnxruntime",
@@ -58,10 +68,10 @@ class RTMPoseBackend(PoseBackend):
                 np.zeros((1, 17), dtype=np.float32),
             )
 
-        kps = np.array(keypoints, dtype=np.float32)  # [P, 17, 2]
-        conf = np.array(scores, dtype=np.float32)  # [P, 17]
+        kps = np.array(keypoints, dtype=np.float32)   # [P, 17, 2]
+        conf = np.array(scores, dtype=np.float32)      # [P, 17]
 
-        # Ensure at least 1 person dimension
+        # Guard: rtmlib may return [17, 2] for a single person
         if kps.ndim == 2:
             kps = kps[np.newaxis]
             conf = conf[np.newaxis]
