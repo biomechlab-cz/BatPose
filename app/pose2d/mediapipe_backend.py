@@ -18,8 +18,8 @@ MP_TO_COCO17: list[int] = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26
 # the balanced default; "lite" is fastest/least accurate.
 _MODEL_BASE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker"
 _MODELS: dict[str, str] = {
-    "lite":  f"{_MODEL_BASE}/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-    "full":  f"{_MODEL_BASE}/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+    "lite": f"{_MODEL_BASE}/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    "full": f"{_MODEL_BASE}/pose_landmarker_full/float16/1/pose_landmarker_full.task",
     "heavy": f"{_MODEL_BASE}/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
 }
 _CACHE_DIR = Path.home() / ".cache" / "BatPose"
@@ -79,7 +79,7 @@ class MediaPipeBackend(PoseBackend):
         # "image" → detect (stateless per-frame).  Use this for LIVE stereo:
         #           two camera streams can't share a VIDEO-mode tracker, and
         #           multiple VIDEO-mode landmarkers interfere in one process.
-        self._image_mode = (running_mode == "image")
+        self._image_mode = running_mode == "image"
 
         if model_path is None:
             model_path = _ensure_model(model_complexity)

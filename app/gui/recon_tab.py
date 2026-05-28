@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -85,12 +87,37 @@ class ReconTab(QWidget):
             calib = d / "calibration.yml"
             if calib.exists():
                 self._calib_edit.setText(str(calib))
+        pose3d = d / "pose3d.npz"
         if not self._out_edit.text():
-            self._out_edit.setText(str(d / "pose3d.npz"))
+            self._out_edit.setText(str(pose3d))
+
+        # Auto-load any existing reconstruction so the user can view results
+        # immediately without re-running the pipeline.
+        if pose3d.exists():
+            self._try_auto_load_pose3d(str(pose3d))
 
     def set_calibration(self, calib_path: str) -> None:
         """Auto-fill calibration path (called from calibration tab signal)."""
         self._calib_edit.setText(calib_path)
+
+    def _try_auto_load_pose3d(self, explicit_path: str | None = None) -> None:
+        """Load pose3d.npz automatically if it exists and is not already loaded.
+
+        Call with an *explicit_path* to load a known location (e.g. from
+        set_project_dir).  Without an argument the path is derived from the
+        current output-path field or the video directory.
+        """
+        if explicit_path:
+            candidate = explicit_path
+        else:
+            candidate = self._out_edit.text().strip()
+            if not candidate:
+                left = self._left_edit.text().strip()
+                if left:
+                    candidate = str(Path(left).parent / "pose3d.npz")
+        if candidate and Path(candidate).is_file() and candidate != self._pose3d_path:
+            self._log_msg("Found existing pose3d.npz — loading automatically…")
+            self._load_pose3d(candidate)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -169,7 +196,7 @@ class ReconTab(QWidget):
 
         self._num_poses = QSpinBox()
         self._num_poses.setRange(1, 6)
-        self._num_poses.setValue(2)
+        self._num_poses.setValue(1)
         oform.addRow("Max persons:", self._num_poses)
 
         self._min_conf = QDoubleSpinBox()
@@ -282,17 +309,54 @@ class ReconTab(QWidget):
         tl_layout.addWidget(self._slider)
 
         play_row = QHBoxLayout()
-        self._play_btn = QPushButton("Play")
+
+        _si = QApplication.style().standardIcon
+
+        self._seek_back_btn = QPushButton()
+        self._seek_back_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaSeekBackward))
+        self._seek_back_btn.setToolTip("-1 second")
+        self._seek_back_btn.setFixedWidth(34)
+        self._seek_back_btn.clicked.connect(self._on_seek_back)
+
+        self._prev_btn = QPushButton()
+        self._prev_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self._prev_btn.setToolTip("Previous frame")
+        self._prev_btn.setFixedWidth(34)
+        self._prev_btn.clicked.connect(self._on_prev_frame)
+
+        self._play_btn = QPushButton()
+        self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPlay))
+        self._play_btn.setToolTip("Play / Pause")
+        self._play_btn.setFixedWidth(34)
         self._play_btn.setCheckable(True)
         self._play_btn.toggled.connect(self._on_play_toggle)
+
+        self._next_btn = QPushButton()
+        self._next_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self._next_btn.setToolTip("Next frame")
+        self._next_btn.setFixedWidth(34)
+        self._next_btn.clicked.connect(self._on_next_frame)
+
+        self._seek_fwd_btn = QPushButton()
+        self._seek_fwd_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaSeekForward))
+        self._seek_fwd_btn.setToolTip("+1 second")
+        self._seek_fwd_btn.setFixedWidth(34)
+        self._seek_fwd_btn.clicked.connect(self._on_seek_fwd)
+
         self._frame_label = QLabel("Frame: 0 / 0")
         self._fps_label = QLabel("")
         self._speed_combo = QComboBox()
         self._speed_combo.addItems(["0.25×", "0.5×", "1×", "2×"])
         self._speed_combo.setCurrentIndex(2)  # default 1×
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
-        play_row.addWidget(self._play_btn)
+
         play_row.addWidget(self._frame_label)
+        play_row.addStretch()
+        play_row.addWidget(self._seek_back_btn)
+        play_row.addWidget(self._prev_btn)
+        play_row.addWidget(self._play_btn)
+        play_row.addWidget(self._next_btn)
+        play_row.addWidget(self._seek_fwd_btn)
         play_row.addStretch()
         play_row.addWidget(QLabel("Speed:"))
         play_row.addWidget(self._speed_combo)
@@ -331,6 +395,8 @@ class ReconTab(QWidget):
         self._run_btn.setEnabled(all_ok)
         if all_ok:
             self._run_btn.setToolTip("")
+            # Auto-load a pre-existing reconstruction so the user can skip re-running.
+            self._try_auto_load_pose3d()
         else:
             missing = []
             if not left_ok:
@@ -638,7 +704,7 @@ class ReconTab(QWidget):
 
             self._slider.setRange(0, max(0, T - 1))
             self._slider.setValue(0)
-            self._frame_label.setText(f"Frame: 0 / {T}")
+            self._frame_label.setText(self._frame_label_text(0, T))
             self._fps_label.setText(f"{fps:.1f} fps")
             self._pose3d_path = path
             self._base_fps = fps
@@ -746,20 +812,43 @@ class ReconTab(QWidget):
     # Playback
     # ------------------------------------------------------------------
 
+    def _frame_label_text(self, frame: int, total: int) -> str:
+        fps = self._base_fps if self._base_fps > 0 else 30.0
+        secs = frame / fps
+        m, s = divmod(int(secs), 60)
+        dur_secs = max(0, total - 1) / fps
+        dm, ds = divmod(int(dur_secs), 60)
+        return f"Frame: {frame} / {max(0, total - 1)}   {m:02d}:{s:02d} / {dm:02d}:{ds:02d}"
+
     def _on_slider_changed(self, value: int) -> None:
         self._viewer.show_frame(value)
         # Keep the 2D previews in lock-step with the 3D scrubber.
         self._preview_2d.show_frame(value)
         T = self._viewer.frame_count
-        self._frame_label.setText(f"Frame: {value} / {max(0, T - 1)}")
+        self._frame_label.setText(self._frame_label_text(value, T))
 
     def _on_play_toggle(self, checked: bool) -> None:
+        _si = QApplication.style().standardIcon
         if checked:
-            self._play_btn.setText("Pause")
+            self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPause))
             self._play_timer.start()
         else:
-            self._play_btn.setText("Play")
+            self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPlay))
             self._play_timer.stop()
+
+    def _on_prev_frame(self) -> None:
+        self._slider.setValue(max(0, self._slider.value() - 1))
+
+    def _on_next_frame(self) -> None:
+        self._slider.setValue(min(self._slider.maximum(), self._slider.value() + 1))
+
+    def _on_seek_back(self) -> None:
+        step = max(1, int(self._base_fps if self._base_fps > 0 else 30.0))
+        self._slider.setValue(max(0, self._slider.value() - step))
+
+    def _on_seek_fwd(self) -> None:
+        step = max(1, int(self._base_fps if self._base_fps > 0 else 30.0))
+        self._slider.setValue(min(self._slider.maximum(), self._slider.value() + step))
 
     def _on_speed_changed(self, _idx: int) -> None:
         """Update the play-timer interval when speed combo changes."""

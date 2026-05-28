@@ -70,8 +70,10 @@ def _check_drops(label: str, ts_ns: list[int]) -> int:
     period = statistics.median(gaps)
     dropped = sum(max(0, round(g / period) - 1) for g in gaps if g > 1.5 * period)
     if dropped:
-        print(f"              ⚠ {label}: ~{dropped} dropped frame(s) "
-              f"(timestamp gaps > 1.5× the {period/1e6:.1f} ms frame interval)")
+        print(
+            f"              ⚠ {label}: ~{dropped} dropped frame(s) "
+            f"(timestamp gaps > 1.5× the {period / 1e6:.1f} ms frame interval)"
+        )
     return dropped
 
 
@@ -110,8 +112,10 @@ def verify(left: str, right: str, max_jitter_us: float = 1000.0) -> bool:
             rights.append(int(rs))
 
     if len(lefts) < 2:
-        print(f"Sync:         sidecar present but has too few hardware timestamps "
-              f"({missing} rows without them — e.g. simulator source).")
+        print(
+            f"Sync:         sidecar present but has too few hardware timestamps "
+            f"({missing} rows without them)."
+        )
         return ok
 
     # Signed per-frame delta (left − right), in microseconds.  Jitter (stdev)
@@ -125,8 +129,10 @@ def verify(left: str, right: str, max_jitter_us: float = 1000.0) -> bool:
 
     print(f"Sync (hw Δt): {n} frame-pairs")
     print(f"              jitter (stdev) = {jitter:.1f}µs   {rating}")
-    print(f"              constant clock offset = {mean_off/1000:.1f} ms "
-          f"(independent camera clocks — not a sync error)")
+    print(
+        f"              constant clock offset = {mean_off / 1000:.1f} ms "
+        f"(independent camera clocks — not a sync error)"
+    )
     if missing:
         print(f"              ({missing} frame-pair(s) had a dropped/placeholder view)")
 
@@ -144,9 +150,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Verify stereo recording sync + frame counts.")
     ap.add_argument("left", help="left .avi path")
     ap.add_argument("right", help="right .avi path")
-    ap.add_argument("--max-jitter-us", type=float, default=1000.0,
-                    help="max acceptable sync jitter (stdev of per-frame Δt) in "
-                         "microseconds (default 1000)")
+    ap.add_argument(
+        "--max-jitter-us",
+        type=float,
+        default=1000.0,
+        help="max acceptable sync jitter (stdev of per-frame Δt) in microseconds (default 1000)",
+    )
     args = ap.parse_args(argv)
 
     passed = verify(args.left, args.right, args.max_jitter_us)

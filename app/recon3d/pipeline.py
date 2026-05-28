@@ -66,7 +66,7 @@ def reconstruct3d(
     K1, D1 = calib["K1"], calib["D1"]
     K2, D2 = calib["K2"], calib["D2"]
     R, T = calib["R"], calib["T"]
-    fisheye = (calib.get("lens_model", "standard") == "fisheye")
+    fisheye = calib.get("lens_model", "standard") == "fisheye"
 
     if progress_cb:
         progress_cb(5, "Loading 2D poses…")

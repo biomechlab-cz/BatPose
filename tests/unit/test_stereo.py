@@ -185,7 +185,8 @@ class TestCalibrateStereoPointMismatch:
         # L sees ids 0..9 (10 pts), R sees ids 4..13 (10 pts) — overlap = 6 pts (4..9)
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         sel = FrameSelection(
-            frame, frame,
+            frame,
+            frame,
             _det(list(range(10))),
             _det(list(range(4, 14))),
             score=0.5,
@@ -197,8 +198,7 @@ class TestCalibrateStereoPointMismatch:
             patch("cv2.calibrateCamera", return_value=(0.5, fake_K, fake_D, [], [])),
             patch(
                 "cv2.stereoCalibrate",
-                return_value=(0.5, fake_K, fake_D, fake_K, fake_D,
-                              fake_R, fake_T, fake_E, fake_F),
+                return_value=(0.5, fake_K, fake_D, fake_K, fake_D, fake_R, fake_T, fake_E, fake_F),
             ),
         ):
             result = calibrate_stereo(selections, img_size=(640, 480))

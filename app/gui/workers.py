@@ -190,7 +190,7 @@ class CaptureWorker(_BaseWorker):
     """
     Live stereo capture worker.
 
-    Streams frames from any BaseCapture source (FLIR or VideoSimulator).
+    Streams frames from any BaseCapture source.
     Emits frame_ready for UI preview at a throttled rate (~15 fps).
     Recording to AVI can be toggled at runtime via begin_recording / end_recording.
     When recording stops (or the worker is cancelled while recording), recording_finished
@@ -231,10 +231,10 @@ class CaptureWorker(_BaseWorker):
         self._source.start()
         writer_l: Any = None
         writer_r: Any = None
-        ts_file: Any = None       # sidecar CSV handle, open only while recording
+        ts_file: Any = None  # sidecar CSV handle, open only while recording
         was_recording = False
         frame_idx = 0
-        rec_idx = 0               # frames written to the current recording
+        rec_idx = 0  # frames written to the current recording
         preview_stride = max(1, round(self._source.fps / 15))
 
         def _close_writers() -> None:
@@ -268,7 +268,9 @@ class CaptureWorker(_BaseWorker):
                     # each camera's clock), and their absolute difference (µs).
                     ts_file = open(
                         self._timestamps_path(self._out_left, self._out_right),
-                        "w", encoding="utf-8", newline="",
+                        "w",
+                        encoding="utf-8",
+                        newline="",
                     )
                     ts_file.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
                     rec_idx = 0
@@ -322,18 +324,18 @@ class LiveCalibWorker(_BaseWorker):
 
     #: Lens model index → (label, intrinsics_flags, use_fisheye)
     _LENS_MODELS = [
-        ("standard",    0,                             False),
-        ("wide-angle",  _cv2.CALIB_RATIONAL_MODEL,     False),
-        ("fisheye",     0,                             True),
+        ("standard", 0, False),
+        ("wide-angle", _cv2.CALIB_RATIONAL_MODEL, False),
+        ("fisheye", 0, True),
     ]
 
     def __init__(
         self,
-        selections: list,          # list[FrameSelection] — stereo pairs (extrinsics)
+        selections: list,  # list[FrameSelection] — stereo pairs (extrinsics)
         img_size: tuple[int, int],
         board_cfg: dict,
         output_path: str,
-        lens_model: int = 0,       # 0=standard, 1=wide-angle, 2=fisheye
+        lens_model: int = 0,  # 0=standard, 1=wide-angle, 2=fisheye
         all_det_l: list | None = None,  # DetectionResult list — left intrinsics pool
         all_det_r: list | None = None,  # DetectionResult list — right intrinsics pool
         parent=None,

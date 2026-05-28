@@ -1,9 +1,8 @@
-"""Camera capture module (FLIR or video simulator)."""
+"""Camera capture module (FLIR cameras via PySpin)."""
 
 from .base import BaseCapture, CaptureFrame
-from .simulator import VideoSimulator
 
-__all__ = ["BaseCapture", "CaptureFrame", "VideoSimulator"]
+__all__ = ["BaseCapture", "CaptureFrame"]
 
 try:
     from .flir import FlirCapture  # noqa: F401

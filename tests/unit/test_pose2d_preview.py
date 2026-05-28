@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 # Set Qt platform to offscreen so PySide6 imports without a display server.

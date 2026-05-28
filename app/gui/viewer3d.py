@@ -218,10 +218,7 @@ class SkeletonViewer3D(QWidget):
             ):
                 self.double_clicked.emit()
                 return True
-            if (
-                et == QEvent.Type.MouseButtonPress
-                and event.button() == Qt.MouseButton.LeftButton
-            ):
+            if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 self._press_pos = event.position().toPoint()
             elif (
                 et == QEvent.Type.MouseButtonRelease
@@ -324,6 +321,7 @@ class SkeletonViewer3D(QWidget):
         # enough to see ~2 m vertical and ~2 m lateral comfortably.
         try:
             from pyqtgraph import Vector
+
             self._glview.setCameraPosition(
                 pos=Vector(0.0, person_depth, person_height - camera_height_above_floor),
                 distance=4.0,

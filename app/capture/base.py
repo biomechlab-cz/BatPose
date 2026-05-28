@@ -17,14 +17,14 @@ class CaptureFrame:
     timestamp: float  # seconds from capture start
     frame_index: int
     # Hardware timestamps from the camera's internal clock (nanoseconds).
-    # Set by FlirCapture via img.GetTimeStamp(); None for VideoSimulator.
+    # Set by FlirCapture via img.GetTimeStamp(); None when unavailable.
     # The delta between the two values measures hardware sync quality.
     hw_timestamp_left_ns: int | None = None
     hw_timestamp_right_ns: int | None = None
     # Cumulative dropped frames detected via hardware-timestamp gaps since start().
     # A drop is counted when the gap between consecutive hw timestamps exceeds
     # 1.5× the nominal frame period (i.e. at least one frame was skipped in the
-    # camera's NewestOnly buffer).  Always 0 for VideoSimulator.
+    # camera's NewestOnly buffer).
     dropped_frames: int = 0
 
     @property
@@ -40,8 +40,7 @@ class BaseCapture(ABC):
     Abstract interface for a synchronized stereo capture source.
 
     Implementors:
-    - VideoSimulator: replay from two pre-recorded video files
-    - FlirCapture:    live capture from two FLIR cameras via PySpin
+    - FlirCapture: live capture from two FLIR cameras via PySpin
     """
 
     @abstractmethod

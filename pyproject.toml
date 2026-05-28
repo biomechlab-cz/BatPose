@@ -29,6 +29,7 @@ rtmpose = [
 dev = [
     "ruff>=0.3",
     "pytest>=7.4",
+    "pytest-qt>=4.4",
     "mypy>=1.5",
     "pytest-timeout>=2.1",
 ]
@@ -61,3 +62,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 120
+qt_api = "pyside6"

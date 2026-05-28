@@ -31,8 +31,8 @@ class DetectionResult:
     # Diagnostic fields — filled even on partial / failed detection.
     # n_markers > 0 but len(img_pts)==0 means ArUco markers were found but
     # the ChArUco board layout didn't match (wrong squares_x/y or dictionary).
-    n_markers: int = 0    # raw ArUco markers detected
-    partial: bool = False # True = markers found but board not matched
+    n_markers: int = 0  # raw ArUco markers detected
+    partial: bool = False  # True = markers found but board not matched
 
 
 class BoardDetector:
@@ -182,20 +182,20 @@ class CharucoDetector(BoardDetector):
         # --- Fisheye-friendly geometry relaxations ---
         # minMarkerPerimeterRate: 0.02 instead of default 0.03 so markers near
         # the edges of a fisheye frame (which appear compressed) are still found.
-        params.minMarkerPerimeterRate = 0.02        # default 0.03
-        params.maxMarkerPerimeterRate = 4.0         # default 4.0 (keep)
+        params.minMarkerPerimeterRate = 0.02  # default 0.03
+        params.maxMarkerPerimeterRate = 4.0  # default 4.0 (keep)
         # adaptiveThreshWinSizeMax: must exceed the pixel width of a single checker
         # square so the thresholder bridges across the light→dark boundary.
         # At typical working distance squares are ~30–60 px, close-up ~100–150 px.
         # With step=10, max=123: windows 3,13,23,33,43,53,63,73,83,93,103,113,123.
         # 13 px is the sweet spot for medium-range markers (~6 px cells).
         # 33 px is the sweet spot for close-up markers (~19 px cells).
-        params.adaptiveThreshWinSizeMin = 3         # default 3  (keep)
-        params.adaptiveThreshWinSizeMax = 123       # default 23 → cover close-up boards too
-        params.adaptiveThreshWinSizeStep = 10       # default 10 (keep) — step=20 skipped the
-                                                     # 13 px and 33 px windows that are critical
-                                                     # for small (medium-range) and close-up
-                                                     # markers respectively
+        params.adaptiveThreshWinSizeMin = 3  # default 3  (keep)
+        params.adaptiveThreshWinSizeMax = 123  # default 23 → cover close-up boards too
+        params.adaptiveThreshWinSizeStep = 10  # default 10 (keep) — step=20 skipped the
+        # 13 px and 33 px windows that are critical
+        # for small (medium-range) and close-up
+        # markers respectively
         # polygonalApproxAccuracyRate: fisheye distortion bends straight marker edges into
         # curves, so the polygon approximation must allow more deviation from a perfect
         # quadrilateral.  0.15 (vs default 0.03) is needed for ≥150° FOV lenses.
@@ -206,7 +206,7 @@ class CharucoDetector(BoardDetector):
         # Rate < 1/(minHammingDist) → 0 errors (pixel-perfect) — too strict for fisheye.
         # Keep default 0.6 (1-bit tolerance). Background false-positives that pass at
         # 0 errors also pass at 1; the ≥2-marker gate in detect() handles those instead.
-        params.errorCorrectionRate = 0.6            # default (keep)
+        params.errorCorrectionRate = 0.6  # default (keep)
 
         # Pass via positional args — keyword names differ across OpenCV 4.x Python
         # bindings and using the wrong name causes a silent TypeError that is caught
@@ -224,9 +224,7 @@ class CharucoDetector(BoardDetector):
         self._detector = cv2.aruco.CharucoDetector(self._board, charuco_params, params)
 
     def detect(self, gray: np.ndarray) -> DetectionResult | None:
-        charuco_corners, charuco_ids, _marker_corners, marker_ids = self._detector.detectBoard(
-            gray
-        )
+        charuco_corners, charuco_ids, _marker_corners, marker_ids = self._detector.detectBoard(gray)
 
         n_markers = int(len(marker_ids)) if marker_ids is not None else 0
 

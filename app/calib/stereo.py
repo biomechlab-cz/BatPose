@@ -148,25 +148,31 @@ def _avg_rotations(Rs: list[np.ndarray]) -> np.ndarray:
             z = 0.25 * s
         q = np.array([w, x, y, z], dtype=np.float64)
         if qs and np.dot(q, qs[0]) < 0:
-            q = -q                           # fix antipodal hemisphere
+            q = -q  # fix antipodal hemisphere
         qs.append(q)
     q_avg = np.mean(qs, axis=0)
     q_avg /= np.linalg.norm(q_avg)
     w, x, y, z = q_avg
-    return np.array([
-        [1 - 2*(y*y + z*z),  2*(x*y - z*w),    2*(x*z + y*w)],
-        [2*(x*y + z*w),      1 - 2*(x*x + z*z),2*(y*z - x*w)],
-        [2*(x*z - y*w),      2*(y*z + x*w),    1 - 2*(x*x + y*y)],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
 
 
 def _fisheye_reproj_rms(
     obj_pts: list[np.ndarray],
-    ipts_l:  list[np.ndarray],
-    ipts_r:  list[np.ndarray],
-    K1: np.ndarray, D1: np.ndarray,
-    K2: np.ndarray, D2: np.ndarray,
-    R: np.ndarray, T: np.ndarray,
+    ipts_l: list[np.ndarray],
+    ipts_r: list[np.ndarray],
+    K1: np.ndarray,
+    D1: np.ndarray,
+    K2: np.ndarray,
+    D2: np.ndarray,
+    R: np.ndarray,
+    T: np.ndarray,
 ) -> float:
     """Proper joint reprojection RMS for a fisheye stereo calibration.
 
@@ -184,7 +190,10 @@ def _fisheye_reproj_rms(
         try:
             und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
             ok, rvec1, tvec1 = cv2.solvePnP(
-                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                o.reshape(-1, 1, 3),
+                und_l.reshape(-1, 1, 2),
+                K1,
+                D_zero,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
         except cv2.error:
@@ -196,17 +205,23 @@ def _fisheye_reproj_rms(
 
         # Right-camera pose derived from the stereo R/T applied to the left pose.
         R2 = R @ R1
-        T2 = (R @ T1 + T.reshape(3, 1))
+        T2 = R @ T1 + T.reshape(3, 1)
         rvec2, _ = cv2.Rodrigues(R2)
 
         # Reproject through BOTH fisheye cameras.
         proj_l, _ = cv2.fisheye.projectPoints(
             o.reshape(-1, 1, 3).astype(np.float64),
-            rvec1.reshape(1, 3), tvec1.reshape(1, 3), K1, D1,
+            rvec1.reshape(1, 3),
+            tvec1.reshape(1, 3),
+            K1,
+            D1,
         )
         proj_r, _ = cv2.fisheye.projectPoints(
             o.reshape(-1, 1, 3).astype(np.float64),
-            rvec2.reshape(1, 3), T2.reshape(1, 3), K2, D2,
+            rvec2.reshape(1, 3),
+            T2.reshape(1, 3),
+            K2,
+            D2,
         )
 
         err_l = (proj_l.reshape(-1, 2) - il.reshape(-1, 2)) ** 2
@@ -219,11 +234,14 @@ def _fisheye_reproj_rms(
 
 def _fisheye_per_pair_rms(
     obj_pts: list[np.ndarray],
-    ipts_l:  list[np.ndarray],
-    ipts_r:  list[np.ndarray],
-    K1: np.ndarray, D1: np.ndarray,
-    K2: np.ndarray, D2: np.ndarray,
-    R: np.ndarray, T: np.ndarray,
+    ipts_l: list[np.ndarray],
+    ipts_r: list[np.ndarray],
+    K1: np.ndarray,
+    D1: np.ndarray,
+    K2: np.ndarray,
+    D2: np.ndarray,
+    R: np.ndarray,
+    T: np.ndarray,
 ) -> list[float]:
     """Per-pair joint reprojection RMS (px), one value per stereo pair.
 
@@ -242,7 +260,10 @@ def _fisheye_per_pair_rms(
         try:
             und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
             ok, rvec1, tvec1 = cv2.solvePnP(
-                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                o.reshape(-1, 1, 3),
+                und_l.reshape(-1, 1, 2),
+                K1,
+                D_zero,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
         except cv2.error:
@@ -254,15 +275,21 @@ def _fisheye_per_pair_rms(
         R1, _ = cv2.Rodrigues(rvec1)
         T1 = tvec1.reshape(3, 1)
         R2 = R @ R1
-        T2 = (R @ T1 + T.reshape(3, 1))
+        T2 = R @ T1 + T.reshape(3, 1)
         rvec2, _ = cv2.Rodrigues(R2)
         proj_l, _ = cv2.fisheye.projectPoints(
             o.reshape(-1, 1, 3).astype(np.float64),
-            rvec1.reshape(1, 3), tvec1.reshape(1, 3), K1, D1,
+            rvec1.reshape(1, 3),
+            tvec1.reshape(1, 3),
+            K1,
+            D1,
         )
         proj_r, _ = cv2.fisheye.projectPoints(
             o.reshape(-1, 1, 3).astype(np.float64),
-            rvec2.reshape(1, 3), T2.reshape(1, 3), K2, D2,
+            rvec2.reshape(1, 3),
+            T2.reshape(1, 3),
+            K2,
+            D2,
         )
         err_l = (proj_l.reshape(-1, 2) - il.reshape(-1, 2)) ** 2
         err_r = (proj_r.reshape(-1, 2) - ir.reshape(-1, 2)) ** 2
@@ -273,10 +300,12 @@ def _fisheye_per_pair_rms(
 
 def _fisheye_extrinsics_from_solvepnp(
     obj_pts: list[np.ndarray],
-    ipts_l:  list[np.ndarray],
-    ipts_r:  list[np.ndarray],
-    K1: np.ndarray, D1: np.ndarray,
-    K2: np.ndarray, D2: np.ndarray,
+    ipts_l: list[np.ndarray],
+    ipts_r: list[np.ndarray],
+    K1: np.ndarray,
+    D1: np.ndarray,
+    K2: np.ndarray,
+    D2: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Compute stereo extrinsics by averaging per-pair solvePnP solutions.
 
@@ -303,11 +332,17 @@ def _fisheye_extrinsics_from_solvepnp(
             und_l = cv2.fisheye.undistortPoints(il.reshape(-1, 1, 2), K1, D1, P=K1)
             und_r = cv2.fisheye.undistortPoints(ir.reshape(-1, 1, 2), K2, D2, P=K2)
             ok_l, rvec_l, tvec_l = cv2.solvePnP(
-                o.reshape(-1, 1, 3), und_l.reshape(-1, 1, 2), K1, D_zero,
+                o.reshape(-1, 1, 3),
+                und_l.reshape(-1, 1, 2),
+                K1,
+                D_zero,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
             ok_r, rvec_r, tvec_r = cv2.solvePnP(
-                o.reshape(-1, 1, 3), und_r.reshape(-1, 1, 2), K2, D_zero,
+                o.reshape(-1, 1, 3),
+                und_r.reshape(-1, 1, 2),
+                K2,
+                D_zero,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
         except cv2.error:
@@ -390,7 +425,10 @@ def _intersect_stereo_points(
         else:
             # Intersect ids and re-index both views.
             common, idx_l, idx_r = np.intersect1d(
-                ids_l, ids_r, return_indices=True, assume_unique=True,
+                ids_l,
+                ids_r,
+                return_indices=True,
+                assume_unique=True,
             )
             if len(common) < min_per_frame:
                 # Silently skip — not enough overlap to constrain extrinsics from this pair
@@ -450,9 +488,7 @@ def calibrate_stereo(
     """
     w, h = img_size
     if w <= 0 or h <= 0:
-        raise ValueError(
-            f"img_size must have positive width and height, got img_size={img_size!r}"
-        )
+        raise ValueError(f"img_size must have positive width and height, got img_size={img_size!r}")
 
     MIN_RECOMMENDED_FRAMES = 20
     if len(selections) < 3:
@@ -480,7 +516,9 @@ def calibrate_stereo(
         progress_cb(5, f"Calibrating from {len(selections)} frames…")
 
     obj_pts_all, img_pts_l_all, img_pts_r_all = _intersect_stereo_points(
-        selections, dtype=np.float32, cancel_check=cancel_check,
+        selections,
+        dtype=np.float32,
+        cancel_check=cancel_check,
     )
 
     # Decide between two-phase and single-phase calibration.
@@ -510,7 +548,9 @@ def calibrate_stereo(
                 f"{len(obj_l)} of {len(all_det_l)} frames…",
             )
         _, K1, D1, _, _ = _calibrate_camera_cancellable(
-            obj_l, ipts_l, img_size,
+            obj_l,
+            ipts_l,
+            img_size,
             flags=intrinsics_flags,
             criteria=_CALIB_CRITERIA,
             cancel_check=cancel_check,
@@ -526,7 +566,9 @@ def calibrate_stereo(
                 f"{len(obj_r)} of {len(all_det_r)} frames…",
             )
         _, K2, D2, _, _ = _calibrate_camera_cancellable(
-            obj_r, ipts_r, img_size,
+            obj_r,
+            ipts_r,
+            img_size,
             flags=intrinsics_flags,
             criteria=_CALIB_CRITERIA,
             cancel_check=cancel_check,
@@ -538,8 +580,7 @@ def calibrate_stereo(
         if progress_cb:
             progress_cb(
                 55,
-                f"Two-phase calibration: Phase 2 — extrinsics from "
-                f"{len(selections)} stereo pairs…",
+                f"Two-phase calibration: Phase 2 — extrinsics from {len(selections)} stereo pairs…",
             )
         stereo_flags = cv2.CALIB_FIX_INTRINSIC
     else:
@@ -547,7 +588,9 @@ def calibrate_stereo(
             progress_cb(20, "Calibrating left camera…")
 
         _, K1, D1, _, _ = _calibrate_camera_cancellable(
-            obj_pts_all, img_pts_l_all, img_size,
+            obj_pts_all,
+            img_pts_l_all,
+            img_size,
             flags=intrinsics_flags,
             criteria=_CALIB_CRITERIA,
             cancel_check=cancel_check,
@@ -557,7 +600,9 @@ def calibrate_stereo(
             progress_cb(40, "Calibrating right camera…")
 
         _, K2, D2, _, _ = _calibrate_camera_cancellable(
-            obj_pts_all, img_pts_r_all, img_size,
+            obj_pts_all,
+            img_pts_r_all,
+            img_size,
             flags=intrinsics_flags,
             criteria=_CALIB_CRITERIA,
             cancel_check=cancel_check,
@@ -642,7 +687,9 @@ def calibrate_stereo_fisheye(
 
     # Build point arrays — intersect by corner ID so each pair has identical sets.
     obj_pts_all, img_pts_l_all, img_pts_r_all = _intersect_stereo_points(
-        selections, dtype=np.float64, cancel_check=cancel_check,
+        selections,
+        dtype=np.float64,
+        cancel_check=cancel_check,
     )
 
     # ------------------------------------------------------------------ #
@@ -652,9 +699,7 @@ def calibrate_stereo_fisheye(
     # ------------------------------------------------------------------ #
     _w, _h = img_size
     _K_init = np.array(
-        [[_w / 2.0, 0.0, _w / 2.0],
-         [0.0, _w / 2.0, _h / 2.0],
-         [0.0, 0.0, 1.0]],
+        [[_w / 2.0, 0.0, _w / 2.0], [0.0, _w / 2.0, _h / 2.0], [0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
     _D_init = np.zeros((4, 1), dtype=np.float64)
@@ -702,9 +747,9 @@ def calibrate_stereo_fisheye(
             "or switch to 'Wide-angle (rational model)'."
         )
 
-    obj_pts  = [obj_pts_all[i]   for i in valid_both]
-    ipts_l   = [img_pts_l_all[i] for i in valid_both]
-    ipts_r   = [img_pts_r_all[i] for i in valid_both]
+    obj_pts = [obj_pts_all[i] for i in valid_both]
+    ipts_l = [img_pts_l_all[i] for i in valid_both]
+    ipts_r = [img_pts_r_all[i] for i in valid_both]
 
     # CALIB_RECOMPUTE_EXTRINSIC refines R/T each LM iteration.
     # CALIB_FIX_SKEW: skew is 0 on every digital sensor.
@@ -719,7 +764,9 @@ def calibrate_stereo_fisheye(
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
 
     def _fisheye_intrinsics_from_dets(
-        all_det: list, side_label: str, init_progress: int,
+        all_det: list,
+        side_label: str,
+        init_progress: int,
     ) -> tuple[np.ndarray, np.ndarray, float]:
         """Calibrate fisheye intrinsics from a per-camera detection pool.
 
@@ -733,10 +780,16 @@ def calibrate_stereo_fisheye(
         obj_p = [d.obj_pts.reshape(-1, 1, 3).astype(np.float64) for d in sub]
         ipt_p = [d.img_pts.reshape(-1, 1, 2).astype(np.float64) for d in sub]
         # Drop frames whose first corner is degenerate under the initial K/D.
-        kept = [i for i in range(len(ipt_p))
-                if float(np.linalg.norm(
-                    cv2.fisheye.undistortPoints(ipt_p[i][0].reshape(1, 1, 2),
-                                                _K_init, _D_init))) > 1e-9]
+        kept = [
+            i
+            for i in range(len(ipt_p))
+            if float(
+                np.linalg.norm(
+                    cv2.fisheye.undistortPoints(ipt_p[i][0].reshape(1, 1, 2), _K_init, _D_init)
+                )
+            )
+            > 1e-9
+        ]
         if len(kept) < 3:
             raise RuntimeError(
                 f"Fisheye {side_label}: only {len(kept)} of {len(sub)} frames "
@@ -750,8 +803,7 @@ def calibrate_stereo_fisheye(
         if progress_cb:
             progress_cb(
                 init_progress,
-                f"Fisheye: {side_label} intrinsics from {n_total} of "
-                f"{len(all_det)} frames…",
+                f"Fisheye: {side_label} intrinsics from {n_total} of {len(all_det)} frames…",
             )
 
         # Retry loop: progressively drop random frames on InitExtrinsics failure.
@@ -769,8 +821,11 @@ def calibrate_stereo_fisheye(
             ip_use = [ipt_p[i] for i in use]
             try:
                 rms_, K_, D_, _, _ = cv2.fisheye.calibrate(
-                    o_use, ip_use, img_size,
-                    _K_init.copy(), _D_init.copy(),
+                    o_use,
+                    ip_use,
+                    img_size,
+                    _K_init.copy(),
+                    _D_init.copy(),
                     flags=fisheye_flags_single,
                     criteria=criteria,
                 )
@@ -786,8 +841,12 @@ def calibrate_stereo_fisheye(
                 # Drop one more random frame and retry. Only do this for the
                 # well-known degeneracy assertions — propagate everything else.
                 msg = str(exc)
-                if not ("InitExtrinsics" in msg or "norm_u1" in msg
-                        or "CalibrateExtrinsics" in msg or "InitIntrinsics" in msg):
+                if not (
+                    "InitExtrinsics" in msg
+                    or "norm_u1" in msg
+                    or "CalibrateExtrinsics" in msg
+                    or "InitIntrinsics" in msg
+                ):
                     raise
                 candidates = [i for i in indices if i not in dropped]
                 if not candidates:
@@ -810,13 +869,14 @@ def calibrate_stereo_fisheye(
 
     # Decide between two-phase (preferred for fisheye) and single-phase.
     use_two_phase = (
-        all_det_l is not None and all_det_r is not None
+        all_det_l is not None
+        and all_det_r is not None
         and len(all_det_l) > len(valid_both)
         and len(all_det_r) > len(valid_both)
     )
 
     if use_two_phase:
-        K1, D1, rms_l = _fisheye_intrinsics_from_dets(all_det_l, "left",  20)
+        K1, D1, rms_l = _fisheye_intrinsics_from_dets(all_det_l, "left", 20)
         if cancel_check and cancel_check():
             raise RuntimeError("Cancelled")
         K2, D2, rms_r = _fisheye_intrinsics_from_dets(all_det_r, "right", 40)
@@ -830,8 +890,11 @@ def calibrate_stereo_fisheye(
             progress_cb(20, f"Fisheye: calibrating left camera ({len(obj_pts)} frames)…")
         try:
             rms_l, K1, D1, _, _ = cv2.fisheye.calibrate(
-                obj_pts, ipts_l, img_size,
-                _K_init.copy(), _D_init.copy(),
+                obj_pts,
+                ipts_l,
+                img_size,
+                _K_init.copy(),
+                _D_init.copy(),
                 flags=fisheye_flags_single,
                 criteria=criteria,
             )
@@ -851,8 +914,11 @@ def calibrate_stereo_fisheye(
             progress_cb(40, f"Fisheye: left RMS={rms_l:.3f}px — calibrating right camera…")
         try:
             rms_r, K2, D2, _, _ = cv2.fisheye.calibrate(
-                obj_pts, ipts_r, img_size,
-                _K_init.copy(), _D_init.copy(),
+                obj_pts,
+                ipts_r,
+                img_size,
+                _K_init.copy(),
+                _D_init.copy(),
                 flags=fisheye_flags_single,
                 criteria=criteria,
             )
@@ -886,8 +952,8 @@ def calibrate_stereo_fisheye(
     D1 = np.ascontiguousarray(np.asarray(D1, dtype=np.float64)).reshape(4, 1)
     D2 = np.ascontiguousarray(np.asarray(D2, dtype=np.float64)).reshape(4, 1)
     obj_pts = [np.ascontiguousarray(a, dtype=np.float64) for a in obj_pts]
-    ipts_l  = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_l]
-    ipts_r  = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_r]
+    ipts_l = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_l]
+    ipts_r = [np.ascontiguousarray(a, dtype=np.float64) for a in ipts_r]
 
     # cv2.fisheye.stereoCalibrate returns (rms, K1, D1, K2, D2, R, T) in
     # OpenCV ≤4.6 but inserts (rvecs, tvecs) before (flags, criteria) in the
@@ -913,8 +979,13 @@ def calibrate_stereo_fisheye(
         """
         try:
             _res = cv2.fisheye.stereoCalibrate(
-                o_list, l_list, r_list,
-                K1, D1, K2, D2,
+                o_list,
+                l_list,
+                r_list,
+                K1,
+                D1,
+                K2,
+                D2,
                 img_size,
                 flags=cv2.fisheye.CALIB_FIX_INTRINSIC,
                 criteria=criteria,
@@ -935,7 +1006,13 @@ def calibrate_stereo_fisheye(
                 )
                 _FISHEYE_STEREO_DETAIL_LOGGED = True
             _R, _T, _rms = _fisheye_extrinsics_from_solvepnp(
-                o_list, l_list, r_list, K1, D1, K2, D2,
+                o_list,
+                l_list,
+                r_list,
+                K1,
+                D1,
+                K2,
+                D2,
             )
             return _R, _T, float(_rms), "solvePnP-averaging"
 
@@ -964,8 +1041,8 @@ def calibrate_stereo_fisheye(
             if progress_cb:
                 progress_cb(80, f"Refining stereo on {len(keep)} inlier pairs…")
             o_in = [obj_pts[i] for i in keep]
-            l_in = [ipts_l[i]  for i in keep]
-            r_in = [ipts_r[i]  for i in keep]
+            l_in = [ipts_l[i] for i in keep]
+            r_in = [ipts_r[i] for i in keep]
             R2_, T2_, rms2_, path2_ = _run_stereo(o_in, l_in, r_in)
             rms2_joint = _fisheye_reproj_rms(o_in, l_in, r_in, K1, D1, K2, D2, R2_, T2_)
             rms_full_joint = _fisheye_reproj_rms(obj_pts, ipts_l, ipts_r, K1, D1, K2, D2, R, T)
@@ -1004,7 +1081,7 @@ def calibrate_stereo_fisheye(
         "E": E,
         "F": F,
         "rms": float(rms),
-        "n_frames": len(obj_pts),   # actual frames used (after degenerate-frame filter)
+        "n_frames": len(obj_pts),  # actual frames used (after degenerate-frame filter)
         "image_size": list(img_size),
         "lens_model": "fisheye",
     }

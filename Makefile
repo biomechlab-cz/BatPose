@@ -1,4 +1,4 @@
-.PHONY: install lint test e2e run-gui clean
+.PHONY: install lint test e2e test-integration test-ui test-all run-gui clean
 
 install:
 	uv venv .venv --python 3.12
@@ -20,6 +20,15 @@ test:
 
 e2e:
 	uv run pytest tests/e2e -v
+
+test-integration:
+	uv run pytest tests/integration -v
+
+test-ui:
+	uv run pytest tests/ui -v
+
+test-all:
+	uv run pytest tests/ -v
 
 run-gui:
 	uv run python -m app.gui

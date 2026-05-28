@@ -1,13 +1,11 @@
 """
-Live capture tab — FLIR cameras or video simulator.
+Live capture tab — FLIR cameras.
 
-The tab is always present and guides the user through setup:
+The tab guides the user through setup:
   Step 1 (SDK missing)    → installation instructions
   Step 2 (SDK found)      → connect cameras + wiring diagram + Detect button
   Step 3 (2+ cams found)  → assign left/right serials, pick primary, configure sync
   Streaming               → Start Preview, Start/Stop Recording
-
-The video-simulator alternative is always accessible via the source radio buttons.
 """
 
 from __future__ import annotations
@@ -15,7 +13,8 @@ from __future__ import annotations
 import statistics
 import time
 from collections import deque
-from concurrent.futures import Future as _Future, ThreadPoolExecutor as _ThreadPool
+from concurrent.futures import Future as _Future
+from concurrent.futures import ThreadPoolExecutor as _ThreadPool
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +45,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .viewer3d import COCO17_EDGES, SkeletonViewer3D
+from .workers import CaptureWorker
 
 
 class _ClickableLabel(QLabel):
@@ -80,6 +82,7 @@ class _Fullscreen3DSkeleton(QDialog):
 
         # Local import to avoid a circular: viewer3d imports nothing of ours.
         from .viewer3d import SkeletonViewer3D as _SkV  # noqa: PLC0415
+
         self.viewer = _SkV(self)
         self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # Same gesture as the camera fullscreen preview: a clean click closes
@@ -151,8 +154,11 @@ class _FullscreenPreview(QDialog):
         if bgr is None:
             return
         rgb = QImage(
-            bgr[:, :, ::-1].tobytes(), bgr.shape[1], bgr.shape[0],
-            bgr.shape[1] * 3, QImage.Format.Format_RGB888,
+            bgr[:, :, ::-1].tobytes(),
+            bgr.shape[1],
+            bgr.shape[0],
+            bgr.shape[1] * 3,
+            QImage.Format.Format_RGB888,
         )
         pix = QPixmap.fromImage(rgb)
         target = self._label.size()
@@ -164,14 +170,25 @@ class _FullscreenPreview(QDialog):
             )
         self._label.setPixmap(pix)
 
-from .viewer3d import COCO17_EDGES, SkeletonViewer3D
-from .workers import CaptureWorker
 
 _COCO17_NAMES = [
-    "nose", "L-eye", "R-eye", "L-ear", "R-ear",
-    "L-shoulder", "R-shoulder", "L-elbow", "R-elbow",
-    "L-wrist", "R-wrist", "L-hip", "R-hip",
-    "L-knee", "R-knee", "L-ankle", "R-ankle",
+    "nose",
+    "L-eye",
+    "R-eye",
+    "L-ear",
+    "R-ear",
+    "L-shoulder",
+    "R-shoulder",
+    "L-elbow",
+    "R-elbow",
+    "L-wrist",
+    "R-wrist",
+    "L-hip",
+    "R-hip",
+    "L-knee",
+    "R-knee",
+    "L-ankle",
+    "R-ankle",
 ]
 
 try:
@@ -182,14 +199,24 @@ except ImportError:
     _PYSPIN_AVAILABLE = False
 
 
-def _bgr_to_pixmap(bgr: np.ndarray, max_w: int = 480) -> QPixmap:
+def _bgr_to_pixmap(bgr: np.ndarray) -> QPixmap:
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
     qimg = QImage(rgb.tobytes(), w, h, ch * w, QImage.Format.Format_RGB888)
-    pix = QPixmap.fromImage(qimg)
-    if w > max_w:
-        pix = pix.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
-    return pix
+    return QPixmap.fromImage(qimg)
+
+
+def _set_preview(label: QLabel, bgr: np.ndarray) -> None:
+    """Convert a BGR frame and display it scaled to fill the label (aspect-correct)."""
+    pix = _bgr_to_pixmap(bgr)
+    target = label.size()
+    if target.width() > 0 and target.height() > 0:
+        pix = pix.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    label.setPixmap(pix)
 
 
 def _status_html(text: str, color: str) -> str:
@@ -199,13 +226,13 @@ def _status_html(text: str, color: str) -> str:
 class CaptureTab(QWidget):
     """Always-visible live capture tab with step-by-step camera setup guidance."""
 
-    recording_saved = Signal(str, str)      # left_avi_path, right_avi_path
-    calibration_saved = Signal(str)         # calibration.yml path
+    recording_saved = Signal(str, str)  # left_avi_path, right_avi_path
+    calibration_saved = Signal(str)  # calibration.yml path
 
     # Pose-diversity grid constants
-    _CALIB_GRID = 4           # divide each image axis into this many cells
-    _CALIB_MAX_PER_CELL = 3   # max captures whose board centroid falls in one cell
-    _CALIB_MIN_COV = 0.04     # board must cover ≥ 4 % of image area
+    _CALIB_GRID = 4  # divide each image axis into this many cells
+    _CALIB_MAX_PER_CELL = 3  # max captures whose board centroid falls in one cell
+    _CALIB_MIN_COV = 0.04  # board must cover ≥ 4 % of image area
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -220,13 +247,13 @@ class CaptureTab(QWidget):
         #   _calib_right_dets : every frame where RIGHT detected the board (intrinsics K2,D2)
         #   _calib_pairs      : frames where BOTH detected simultaneously (extrinsics R,T)
         # A single capture event may add to 1, 2, or all 3 piles depending on what detected.
-        self._calib_left_dets: list = []       # list[DetectionResult]
-        self._calib_right_dets: list = []      # list[DetectionResult]
-        self._calib_pairs: list = []           # list[FrameSelection]
+        self._calib_left_dets: list = []  # list[DetectionResult]
+        self._calib_right_dets: list = []  # list[DetectionResult]
+        self._calib_pairs: list = []  # list[FrameSelection]
         # Separate pose-diversity grids per pile so each is independently well-spread.
         self._calib_left_grid: dict[tuple[int, int], int] = {}
         self._calib_right_grid: dict[tuple[int, int], int] = {}
-        self._det_left = None                  # DetectionResult | None
+        self._det_left = None  # DetectionResult | None
         self._det_right = None
         # Frames whose pixel data MATCHES the current _det_left/_det_right.
         # The thread pool detects frame N; by the time the result arrives
@@ -234,11 +261,11 @@ class CaptureTab(QWidget):
         # pair correct corner coords with a different image (conceptual mismatch).
         self._detect_submitted_fl: np.ndarray | None = None
         self._detect_submitted_fr: np.ndarray | None = None
-        self._detect_frame_fl: np.ndarray | None = None   # matched to current detection
+        self._detect_frame_fl: np.ndarray | None = None  # matched to current detection
         self._detect_frame_fr: np.ndarray | None = None
-        self._last_frame = None                # most recent CaptureFrame (for re-render)
+        self._last_frame = None  # most recent CaptureFrame (for re-render)
         self._last_auto_capture_time: float = 0.0
-        self._detector = None                  # BoardDetector | None
+        self._detector = None  # BoardDetector | None
         # The outer pool only ever has one in-flight orchestration task at a time;
         # max_workers=1 is fine here.  The actual left/right parallelism happens
         # inside _detect_pair via _detect_lr_pool below.
@@ -261,9 +288,9 @@ class CaptureTab(QWidget):
         # frames corrupt its track), so each camera gets its own instance — these
         # do NOT interfere (verified).  The harder of the two views needs a lower
         # detection-confidence threshold to get its initial lock (see _POSE_CONF).
-        self._pose_backend = None              # left-camera PoseBackend
-        self._pose_backend_r = None            # right-camera PoseBackend
-        self._pose_calib: dict | None = None   # loaded calibration.yml as dict
+        self._pose_backend = None  # left-camera PoseBackend
+        self._pose_backend_r = None  # right-camera PoseBackend
+        self._pose_calib: dict | None = None  # loaded calibration.yml as dict
         # Single in-flight pose-detection future, mirrors the ChArUco pattern.
         self._pose_future: _Future | None = None
         self._pose_submitted_fl: np.ndarray | None = None
@@ -280,7 +307,7 @@ class CaptureTab(QWidget):
         # Track outcome of last 20 detection cycles: 'both' / 'left' / 'right' / 'none'.
         # Used to render the stability indicator under the L/R status labels.
         self._detect_history: deque = deque(maxlen=20)
-        self._calib_worker = None              # LiveCalibWorker | None
+        self._calib_worker = None  # LiveCalibWorker | None
         # 4×4 pose-diversity grid: tracks how many captures fall in each cell.
         # Capped at _CALIB_MAX_PER_CELL so the user must move the board.
         # Used only for the stereo-pair pile.  Per-camera intrinsics use
@@ -331,7 +358,6 @@ class CaptureTab(QWidget):
 
     def session_state(self) -> dict:
         return {
-            "source": "flir" if self._radio_flir.isChecked() else "sim",
             "serials": self._detected_serials,
             "left_serial": self._left_combo.currentText(),
             "right_serial": self._right_combo.currentText(),
@@ -340,19 +366,11 @@ class CaptureTab(QWidget):
             "fps": self._fps_spin.value(),
             "exposure_us": self._exposure_spin.value(),
             "gain_db": self._gain_spin.value(),
-            "sim_left": self._sim_left.text(),
-            "sim_right": self._sim_right.text(),
-            "sim_loop": self._sim_loop.isChecked(),
             "out_folder": self._out_edit.text(),
             "prefix": self._prefix_edit.text(),
         }
 
     def restore_session(self, state: dict) -> None:
-        if state.get("source") == "sim":
-            self._radio_sim.setChecked(True)
-        else:
-            self._radio_flir.setChecked(True)
-
         serials = state.get("serials", [])
         if serials:
             self._detected_serials = serials
@@ -381,9 +399,6 @@ class CaptureTab(QWidget):
             self._exposure_spin.setValue(exp)
         if gain := state.get("gain_db"):
             self._gain_spin.setValue(gain)
-        self._sim_left.setText(state.get("sim_left", ""))
-        self._sim_right.setText(state.get("sim_right", ""))
-        self._sim_loop.setChecked(bool(state.get("sim_loop", False)))
         if out := state.get("out_folder"):
             self._out_edit.setText(out)
         # Restore a custom prefix, but treat the legacy "session" default as
@@ -414,17 +429,6 @@ class CaptureTab(QWidget):
         ctrl.setFixedWidth(400)
         ctrl_outer = QVBoxLayout(ctrl)
         ctrl_outer.setContentsMargins(0, 0, 0, 0)
-
-        # Source selector — always visible
-        src_group = QGroupBox("Capture source")
-        src_row = QHBoxLayout(src_group)
-        self._radio_flir = QRadioButton("FLIR cameras")
-        self._radio_sim = QRadioButton("Video simulator")
-        self._radio_flir.setChecked(True)
-        self._radio_flir.toggled.connect(self._refresh_state)
-        src_row.addWidget(self._radio_flir)
-        src_row.addWidget(self._radio_sim)
-        ctrl_outer.addWidget(src_group)
 
         # Scrollable inner area (so the wizard steps don't clip)
         scroll = QScrollArea()
@@ -474,7 +478,7 @@ class CaptureTab(QWidget):
             "5. Install the SDK runtime first, then the wheel:<br>"
             "&nbsp;&nbsp;<tt>pip install spinnaker_python-4.x.x.x-cp310-...-win_amd64.whl</tt><br><br>"
             "6. Restart BatPose<br><br>"
-            "<i>Until then, use the <b>Video simulator</b> source above.</i>"
+            "<i>Until then, live capture is unavailable.</i>"
         )
         step1_text.setWordWrap(True)
         step1_text.setTextFormat(Qt.TextFormat.RichText)
@@ -569,36 +573,6 @@ class CaptureTab(QWidget):
 
         flir_layout.addWidget(self._step3)
         ctrl_layout.addWidget(self._flir_area)
-
-        # ── Simulator area ───────────────────────────────────────────
-        self._sim_area = QWidget()
-        sim_layout = QVBoxLayout(self._sim_area)
-        sim_layout.setContentsMargins(0, 0, 0, 0)
-        sim_group = QGroupBox("Simulator source videos")
-        sim_form = QFormLayout(sim_group)
-
-        self._sim_left = QLineEdit()
-        self._sim_left.setPlaceholderText("left video…")
-        btn_sl = QPushButton("Browse…")
-        btn_sl.clicked.connect(lambda: self._browse_video(self._sim_left))
-        row_sl = QHBoxLayout()
-        row_sl.addWidget(self._sim_left)
-        row_sl.addWidget(btn_sl)
-
-        self._sim_right = QLineEdit()
-        self._sim_right.setPlaceholderText("right video…")
-        btn_sr = QPushButton("Browse…")
-        btn_sr.clicked.connect(lambda: self._browse_video(self._sim_right))
-        row_sr = QHBoxLayout()
-        row_sr.addWidget(self._sim_right)
-        row_sr.addWidget(btn_sr)
-
-        self._sim_loop = QCheckBox("Loop")
-        sim_form.addRow("Left video:", row_sl)
-        sim_form.addRow("Right video:", row_sr)
-        sim_form.addRow("", self._sim_loop)
-        sim_layout.addWidget(sim_group)
-        ctrl_layout.addWidget(self._sim_area)
 
         # ── Output ───────────────────────────────────────────────────
         out_group = QGroupBox("Recording output")
@@ -741,10 +715,7 @@ class CaptureTab(QWidget):
         self._calib_panel.setObjectName("calibPanel")
         self._calib_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self._calib_panel.setStyleSheet(
-            "QFrame#calibPanel {"
-            "  background-color: #1c2b3a;"
-            "  border-top: 2px solid #2980b9;"
-            "}"
+            "QFrame#calibPanel {  background-color: #1c2b3a;  border-top: 2px solid #2980b9;}"
         )
         self._calib_panel.setVisible(False)
 
@@ -870,11 +841,13 @@ class CaptureTab(QWidget):
         lens_row = QHBoxLayout()
         lens_row.addWidget(QLabel("Lens:"))
         self._calib_lens_combo = QComboBox()
-        self._calib_lens_combo.addItems([
-            "Standard  (normal lenses)",
-            "Wide-angle  (rational model)",
-            "Fisheye  (≥ 150° FOV)",
-        ])
+        self._calib_lens_combo.addItems(
+            [
+                "Standard  (normal lenses)",
+                "Wide-angle  (rational model)",
+                "Fisheye  (≥ 150° FOV)",
+            ]
+        )
         self._calib_lens_combo.setToolTip(
             "Standard — 5 distortion coefficients, best for lenses with ≤ 90° FOV.\n"
             "Wide-angle — 8 coefficients (rational model), use for 90–150° FOV.\n"
@@ -918,15 +891,6 @@ class CaptureTab(QWidget):
         )
         det_v.addWidget(self._calib_left_status)
         det_v.addWidget(self._calib_right_status)
-        # Stability indicator — shows what fraction of recent detection cycles
-        # had BOTH cameras detecting the board.  Helps the user find the
-        # overlap zone between the two cameras' fields of view.
-        self._calib_stability_label = QLabel("")
-        self._calib_stability_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._calib_stability_label.setStyleSheet(
-            "font-size: 12px; color: #888; padding: 4px;"
-        )
-        det_v.addWidget(self._calib_stability_label)
         det_v.addStretch()
 
         cols.addWidget(det_col, 1)
@@ -947,7 +911,8 @@ class CaptureTab(QWidget):
             b.setFormat(fmt)
             b.setTextVisible(True)
             return b
-        self._calib_left_bar  = _mk_bar(20, "Left intrinsics: 0 / 20 frames")
+
+        self._calib_left_bar = _mk_bar(20, "Left intrinsics: 0 / 20 frames")
         self._calib_right_bar = _mk_bar(20, "Right intrinsics: 0 / 20 frames")
         self._calib_stereo_bar = _mk_bar(8, "Stereo pairs: 0 / 8 (need ≥ 6)")
         cap_v.addWidget(self._calib_left_bar)
@@ -1029,8 +994,7 @@ class CaptureTab(QWidget):
         self._pose_panel.setObjectName("posePanel")
         self._pose_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self._pose_panel.setStyleSheet(
-            "QFrame#posePanel { background:#162026; border:1px solid #2a3940;"
-            " border-radius:6px; }"
+            "QFrame#posePanel { background:#162026; border:1px solid #2a3940; border-radius:6px; }"
         )
         self._pose_panel.setVisible(False)
 
@@ -1067,7 +1031,8 @@ class CaptureTab(QWidget):
         calib_browse.clicked.connect(self._on_pose_browse_calib)
         calib_row.addWidget(self._pose_calib_edit)
         calib_row.addWidget(calib_browse)
-        calib_row_w = QWidget(); calib_row_w.setLayout(calib_row)
+        calib_row_w = QWidget()
+        calib_row_w.setLayout(calib_row)
         set_form.addRow("Calibration:", calib_row_w)
 
         self._pose_backend_combo = QComboBox()
@@ -1135,14 +1100,6 @@ class CaptureTab(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_state(self) -> None:
-        flir = self._radio_flir.isChecked()
-        self._flir_area.setVisible(flir)
-        self._sim_area.setVisible(not flir)
-
-        if not flir:
-            self._start_btn.setEnabled(self._worker is None)
-            return
-
         # SDK status
         if _PYSPIN_AVAILABLE:
             self._sdk_label.setText(_status_html("✓ installed", "#2ecc71"))
@@ -1154,7 +1111,7 @@ class CaptureTab(QWidget):
         if n == 0:
             self._cam_label.setText(_status_html("none detected — click Detect", "#e67e22"))
         elif n == 1:
-            self._cam_label.setText(_status_html(f"1 found (need at least 2)", "#e67e22"))
+            self._cam_label.setText(_status_html("1 found (need at least 2)", "#e67e22"))
         else:
             self._cam_label.setText(_status_html(f"{n} detected", "#2ecc71"))
 
@@ -1231,13 +1188,6 @@ class CaptureTab(QWidget):
             self._detect_btn.setEnabled(True)
             self._refresh_state()
 
-    def _browse_video(self, edit: QLineEdit) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video", "", "Videos (*.mp4 *.avi *.mov *.mkv);;All (*)"
-        )
-        if path:
-            edit.setText(path)
-
     def _browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if path:
@@ -1248,7 +1198,7 @@ class CaptureTab(QWidget):
         # The camera firmware enforces the hard limit itself; this warning
         # catches configurations that leave almost no headroom for the
         # hardware trigger handshake on the secondary camera.
-        if self._radio_flir.isChecked() and self._sync_check.isChecked():
+        if self._sync_check.isChecked():
             fps = self._fps_spin.value()
             exposure_us = self._exposure_spin.value()
             frame_period_us = 1_000_000.0 / fps
@@ -1257,8 +1207,8 @@ class CaptureTab(QWidget):
                 ans = QMessageBox.question(
                     self,
                     "Exposure near frame-period limit",
-                    f"At {fps:.0f} fps the frame period is {frame_period_us/1000:.1f} ms. "
-                    f"A {exposure_us/1000:.1f} ms exposure uses <b>{usage_pct:.0f}%</b> of "
+                    f"At {fps:.0f} fps the frame period is {frame_period_us / 1000:.1f} ms. "
+                    f"A {exposure_us / 1000:.1f} ms exposure uses <b>{usage_pct:.0f}%</b> of "
                     f"that, leaving under 5% for the hardware trigger handshake.<br><br>"
                     "The secondary camera may miss triggers at this setting.<br><br>"
                     "Continue anyway?",
@@ -1340,6 +1290,7 @@ class CaptureTab(QWidget):
                     self._detect_frame_fr = self._detect_submitted_fr
                 except Exception as _exc:
                     import traceback as _tb
+
                     print(f"[board detect] exception: {_exc}\n{_tb.format_exc()}")
                     self._det_left = self._det_right = None
                 finally:
@@ -1357,7 +1308,7 @@ class CaptureTab(QWidget):
             ):
                 fl = frame.frame_left.copy()
                 fr = frame.frame_right.copy()
-                self._detect_submitted_fl = fl   # remember what we submitted
+                self._detect_submitted_fl = fl  # remember what we submitted
                 self._detect_submitted_fr = fr
                 try:
                     self._detect_future = self._detect_pool.submit(
@@ -1368,12 +1319,14 @@ class CaptureTab(QWidget):
                     self._pool_shutdown = True
 
             # Display with overlay using last known detection result
-            self._preview_left.setPixmap(_bgr_to_pixmap(
-                CaptureTab._draw_overlay(frame.frame_left, self._det_left, "L"), 480
-            ))
-            self._preview_right.setPixmap(_bgr_to_pixmap(
-                CaptureTab._draw_overlay(frame.frame_right, self._det_right, "R"), 480
-            ))
+            _set_preview(
+                self._preview_left,
+                CaptureTab._draw_overlay(frame.frame_left, self._det_left, "L"),
+            )
+            _set_preview(
+                self._preview_right,
+                CaptureTab._draw_overlay(frame.frame_right, self._det_right, "R"),
+            )
         elif self._pose_active:
             # ── Live Pose Tracking branch ─────────────────────────────────
             # Collect any completed detection.
@@ -1383,6 +1336,7 @@ class CaptureTab(QWidget):
                     self._process_pose_result(kps_l, conf_l, kps_r, conf_r)
                 except Exception as _exc:
                     import traceback as _tb
+
                     print(f"[live pose] exception: {_exc}\n{_tb.format_exc()}")
                     self._pose_status_label.setText(
                         f"<span style='color:#e74c3c'>Error: {_exc}</span>"
@@ -1404,7 +1358,10 @@ class CaptureTab(QWidget):
                 try:
                     self._pose_future = self._detect_pool.submit(
                         CaptureTab._pose_detect_pair,
-                        self._pose_backend, self._pose_backend_r, fl, fr,
+                        self._pose_backend,
+                        self._pose_backend_r,
+                        fl,
+                        fr,
                     )
                 except RuntimeError:
                     self._pool_shutdown = True
@@ -1412,18 +1369,22 @@ class CaptureTab(QWidget):
             # Display with 2D skeleton overlay drawn from the last completed result.
             if self._pose_overlay_check.isChecked() and self._pose_last_kp_l is not None:
                 left = self._draw_pose_overlay(
-                    frame.frame_left, self._pose_last_kp_l, self._pose_last_conf_l,
+                    frame.frame_left,
+                    self._pose_last_kp_l,
+                    self._pose_last_conf_l,
                 )
                 right = self._draw_pose_overlay(
-                    frame.frame_right, self._pose_last_kp_r, self._pose_last_conf_r,
+                    frame.frame_right,
+                    self._pose_last_kp_r,
+                    self._pose_last_conf_r,
                 )
             else:
                 left, right = frame.frame_left, frame.frame_right
-            self._preview_left.setPixmap(_bgr_to_pixmap(left, 480))
-            self._preview_right.setPixmap(_bgr_to_pixmap(right, 480))
+            _set_preview(self._preview_left, left)
+            _set_preview(self._preview_right, right)
         else:
-            self._preview_left.setPixmap(_bgr_to_pixmap(frame.frame_left, 480))
-            self._preview_right.setPixmap(_bgr_to_pixmap(frame.frame_right, 480))
+            _set_preview(self._preview_left, frame.frame_left)
+            _set_preview(self._preview_right, frame.frame_right)
 
         # Push the latest frame into the fullscreen inspect window if open.
         if self._fs_preview is not None and self._fs_side is not None:
@@ -1448,10 +1409,7 @@ class CaptureTab(QWidget):
         self._fs_side = side
         # Seed with the most recent frame so we don't show "Waiting…" for one tick.
         if self._last_frame is not None:
-            src = (
-                self._last_frame.frame_left if side == "L"
-                else self._last_frame.frame_right
-            )
+            src = self._last_frame.frame_left if side == "L" else self._last_frame.frame_right
             dlg.showFullScreen()
             dlg.set_frame(src)
         else:
@@ -1495,8 +1453,7 @@ class CaptureTab(QWidget):
 
     def _update_sync_indicator(self, frame) -> None:
         if frame.hw_timestamp_left_ns is None or frame.hw_timestamp_right_ns is None:
-            # VideoSimulator — no hardware timestamps
-            self._sync_delta_label.setText("— (simulator)")
+            self._sync_delta_label.setText("— (no hw timestamps)")
             self._sync_delta_label.setStyleSheet("color: #888;")
             self._sync_quality_label.setText("")
             return
@@ -1530,9 +1487,7 @@ class CaptureTab(QWidget):
         else:
             color, rating = "#e74c3c", "✗ Poor — check wiring"
 
-        jitter_str = (
-            f"{jitter_us/1_000:.2f} ms" if jitter_us >= 1_000 else f"{jitter_us:.1f} µs"
-        )
+        jitter_str = f"{jitter_us / 1_000:.2f} ms" if jitter_us >= 1_000 else f"{jitter_us:.1f} µs"
 
         self._sync_delta_label.setText(f"jitter {jitter_str}")
         self._sync_delta_label.setStyleSheet(f"color:{color}; font-weight:bold;")
@@ -1605,11 +1560,7 @@ class CaptureTab(QWidget):
 
     def _on_calib_close_clicked(self) -> None:
         """Close the calibration panel, with a discard warning if frames exist."""
-        total = (
-            len(self._calib_left_dets)
-            + len(self._calib_right_dets)
-            + len(self._calib_pairs)
-        )
+        total = len(self._calib_left_dets) + len(self._calib_right_dets) + len(self._calib_pairs)
         if total:
             ans = QMessageBox.question(
                 self,
@@ -1642,6 +1593,7 @@ class CaptureTab(QWidget):
         """Open the calibration panel and initialise the board detector."""
         try:
             from app.calib.board import make_detector
+
             self._detector = make_detector(self._live_board_cfg())
         except Exception as exc:
             QMessageBox.warning(self, "Board config error", str(exc))
@@ -1694,7 +1646,10 @@ class CaptureTab(QWidget):
     def _on_pose_browse_calib(self) -> None:
         start = self._pose_calib_edit.text().strip() or (self._project_dir or "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select calibration.yml", start, "YAML (*.yml *.yaml)",
+            self,
+            "Select calibration.yml",
+            start,
+            "YAML (*.yml *.yaml)",
         )
         if path:
             self._pose_calib_edit.setText(path)
@@ -1722,12 +1677,14 @@ class CaptureTab(QWidget):
             )
 
         from app.calib.stereo import load_calibration  # noqa: PLC0415
+
         self._pose_calib = load_calibration(calib_path)
 
         # Build the backend on the main thread (it owns C++ resources / model load).
         # Using the same instance for both cameras means detect() is serialised
         # within the worker thread.  MediaPipe is fast enough on CPU for live use.
         from app.pose2d.mediapipe_backend import MediaPipeBackend  # noqa: PLC0415
+
         n_poses = int(self._pose_num_spin.value())
         # One VIDEO-mode landmarker per camera.  Confidence is lowered to 0.3:
         # at the default 0.5 the harder camera view often fails to get its
@@ -1735,12 +1692,16 @@ class CaptureTab(QWidget):
         # cameras lock reliably (measured) without spurious detections.
         conf = 0.3
         self._pose_backend = MediaPipeBackend(
-            num_poses=n_poses, running_mode="video",
-            min_detection_confidence=conf, min_tracking_confidence=conf,
+            num_poses=n_poses,
+            running_mode="video",
+            min_detection_confidence=conf,
+            min_tracking_confidence=conf,
         )
         self._pose_backend_r = MediaPipeBackend(
-            num_poses=n_poses, running_mode="video",
-            min_detection_confidence=conf, min_tracking_confidence=conf,
+            num_poses=n_poses,
+            running_mode="video",
+            min_detection_confidence=conf,
+            min_tracking_confidence=conf,
         )
 
         # Drop any prior smoothing state so a fresh stream starts clean.
@@ -1758,9 +1719,7 @@ class CaptureTab(QWidget):
         # in front of left camera).  User can still orbit / zoom with the mouse.
         self._preview_3d.setVisible(True)
         self._preview_3d.setup_live_view()
-        self._pose_status_label.setText(
-            "Tracking — waiting for first frame…"
-        )
+        self._pose_status_label.setText("Tracking — waiting for first frame…")
 
     def _stop_pose_tracking(self) -> None:
         """Stop the live pose loop and release backend resources."""
@@ -1802,8 +1761,10 @@ class CaptureTab(QWidget):
 
     def _process_pose_result(
         self,
-        kps_l: np.ndarray, conf_l: np.ndarray,
-        kps_r: np.ndarray, conf_r: np.ndarray,
+        kps_l: np.ndarray,
+        conf_l: np.ndarray,
+        kps_r: np.ndarray,
+        conf_r: np.ndarray,
     ) -> None:
         """Triangulate the freshly-detected stereo pose, smooth, update the viewer."""
         assert self._pose_calib is not None
@@ -1817,14 +1778,23 @@ class CaptureTab(QWidget):
                 "<span style='color:#e67e22'>No person detected in either view.</span>"
             )
             return
-        kps_l = kps_l[:P]; conf_l = conf_l[:P]
-        kps_r = kps_r[:P]; conf_r = conf_r[:P]
+        kps_l = kps_l[:P]
+        conf_l = conf_l[:P]
+        kps_r = kps_r[:P]
+        conf_r = conf_r[:P]
 
         calib = self._pose_calib
         joints3d, conf3d, repro = triangulate_frame_pair(
-            kps_l, kps_r, conf_l, conf_r,
-            calib["K1"], calib["D1"], calib["K2"], calib["D2"],
-            calib["R"], calib["T"],
+            kps_l,
+            kps_r,
+            conf_l,
+            conf_r,
+            calib["K1"],
+            calib["D1"],
+            calib["K2"],
+            calib["D2"],
+            calib["R"],
+            calib["T"],
             min_conf=float(self._pose_min_conf_spin.value()),
             max_reproj_err=float(self._pose_max_reproj_spin.value()),
             lens_model=calib.get("lens_model", "standard"),
@@ -1853,18 +1823,21 @@ class CaptureTab(QWidget):
         # Metrics readout.
         n_valid = int((conf3d > 0).sum())
         n_total = conf3d.size
-        mean_err = float(np.mean(repro[np.isfinite(repro)])) if np.isfinite(repro).any() else float("nan")
+        mean_err = (
+            float(np.mean(repro[np.isfinite(repro)])) if np.isfinite(repro).any() else float("nan")
+        )
         self._pose_status_label.setText(
             f"<span style='color:#2ecc71'>● Tracking</span> "
             f"<span style='color:#aaa'>· persons {P} · joints {n_valid}/{n_total} valid</span>"
         )
         self._pose_metrics_label.setText(
-            f"mean reproj err: {mean_err:.2f} px"
-            if np.isfinite(mean_err) else "mean reproj err: —"
+            f"mean reproj err: {mean_err:.2f} px" if np.isfinite(mean_err) else "mean reproj err: —"
         )
 
     def _apply_pose_smoothing(
-        self, joints3d: np.ndarray, conf3d: np.ndarray,
+        self,
+        joints3d: np.ndarray,
+        conf3d: np.ndarray,
     ) -> np.ndarray:
         """Apply per-axis OneEuro smoothing.  Uses ~camera-fps as the sampling rate."""
         from app.recon3d.smooth import OneEuroFilter  # noqa: PLC0415
@@ -1873,8 +1846,9 @@ class CaptureTab(QWidget):
         # Allocate one filter per (p, j, axis).  Re-allocate if P changed.
         if self._pose_filters is None or len(self._pose_filters) != P * J * 3:
             fps_hint = (
-                float(self._last_frame.fps) if self._last_frame is not None
-                and getattr(self._last_frame, "fps", 0) else 20.0
+                float(self._last_frame.fps)
+                if self._last_frame is not None and getattr(self._last_frame, "fps", 0)
+                else 20.0
             )
             self._pose_filters = [
                 OneEuroFilter(fps=fps_hint, min_cutoff=0.5, beta=0.05, d_cutoff=1.0)
@@ -1892,9 +1866,7 @@ class CaptureTab(QWidget):
                     continue
                 for ax in range(3):
                     idx = (p * J + j) * 3 + ax
-                    smoothed[p, j, ax] = float(self._pose_filters[idx](
-                        float(joints3d[p, j, ax])
-                    ))
+                    smoothed[p, j, ax] = float(self._pose_filters[idx](float(joints3d[p, j, ax])))
         return smoothed
 
     def _draw_pose_overlay(self, bgr: np.ndarray, kps: np.ndarray, conf: np.ndarray) -> np.ndarray:
@@ -1915,8 +1887,12 @@ class CaptureTab(QWidget):
                 if c[k] < 0.1:
                     continue
                 cv2.circle(
-                    out, (int(pts[k, 0]), int(pts[k, 1])), 4,
-                    (0, 255, 255), -1, cv2.LINE_AA,
+                    out,
+                    (int(pts[k, 0]), int(pts[k, 1])),
+                    4,
+                    (0, 255, 255),
+                    -1,
+                    cv2.LINE_AA,
                 )
         return out
 
@@ -1931,7 +1907,6 @@ class CaptureTab(QWidget):
         self._calib_right_status.setText("RIGHT: —")
         self._calib_right_status.setStyleSheet(idle_style)
         self._detect_history.clear()
-        self._calib_stability_label.setText("")
 
     def _on_board_params_changed(self) -> None:
         """Recreate the board detector immediately when any parameter widget changes.
@@ -1945,6 +1920,7 @@ class CaptureTab(QWidget):
             return  # panel not open — detector will be built on next open
         try:
             from app.calib.board import make_detector
+
             self._detector = make_detector(self._live_board_cfg())
             # Clear any previous config-error message
             if self._calib_status_label.text().startswith("<span style='color:#e67e22'>⚠ Board"):
@@ -2021,7 +1997,7 @@ class CaptureTab(QWidget):
             )
         elif det is not None and det.partial:
             # Partial detection — orange: markers seen but board didn't fit
-            color = (0, 165, 255)   # BGR orange
+            color = (0, 165, 255)  # BGR orange
             cv2.rectangle(out, (4, 4), (w - 4, h - 4), color, 4)
             cv2.putText(
                 out,
@@ -2050,59 +2026,7 @@ class CaptureTab(QWidget):
         return out
 
     def _update_stability_label(self) -> None:
-        """Render the recent-detection summary + a pile-aware capture hint."""
-        h = self._detect_history
-        if not h:
-            self._calib_stability_label.setText("")
-            return
-        n = len(h)
-        both = sum(1 for x in h if x == "both")
-        only_l = sum(1 for x in h if x == "left")
-        only_r = sum(1 for x in h if x == "right")
-        nothing = sum(1 for x in h if x == "none")
-
-        # Decide hint priority based on which pile is the bottleneck.
-        # Targets: 20 / 20 / 8.  A pile "needs work" if it's below its target.
-        n_l = len(self._calib_left_dets)
-        n_r = len(self._calib_right_dets)
-        n_s = len(self._calib_pairs)
-        l_needs = max(0, 20 - n_l)
-        r_needs = max(0, 20 - n_r)
-        s_needs = max(0, 8 - n_s)
-
-        if nothing >= n * 0.5:
-            color, hint = "#e74c3c", "move closer (~0.5–1 m) or check lighting"
-        elif s_needs and l_needs == 0 and r_needs == 0:
-            # Both per-camera piles done — only need more stereo pairs
-            color, hint = ("#3498db", "L & R intrinsics done — focus on the OVERLAP zone "
-                                       "for stereo pairs")
-        elif r_needs > l_needs * 2 and r_needs > 0:
-            # Right pile far behind — explicitly push board into right FOV
-            color, hint = ("#e67e22",
-                           f"⚠ Right pile lagging ({n_r}/20) — point board at RIGHT camera "
-                           "(stereo overlap not required)")
-        elif l_needs > r_needs * 2 and l_needs > 0:
-            color, hint = ("#e67e22",
-                           f"⚠ Left pile lagging ({n_l}/20) — point board at LEFT camera "
-                           "(stereo overlap not required)")
-        elif both >= n * 0.5:
-            color, hint = "#2ecc71", "good overlap — capturing"
-        elif only_l + only_r > both:
-            color = "#e67e22"
-            if only_l > only_r:
-                hint = "move board RIGHT — right cam needs it"
-            elif only_r > only_l:
-                hint = "move board LEFT — left cam needs it"
-            else:
-                hint = "find the overlap zone between cameras"
-        else:
-            color, hint = "#888", "keep moving the board"
-
-        self._calib_stability_label.setText(
-            f"<span style='color:{color}'>"
-            f"last {n}: both={both} · L-only={only_l} · R-only={only_r} · none={nothing}"
-            f"<br>{hint}</span>"
-        )
+        pass
 
     def _on_detection_ready(self) -> None:
         """Called in the main thread when a detection result just arrived."""
@@ -2179,9 +2103,8 @@ class CaptureTab(QWidget):
         # Auto-capture: fire when AT LEAST ONE camera detects AND cooldown elapsed.
         # The capture function decides which piles (left intrinsics / right intrinsics /
         # stereo pairs) to add to based on which cameras have full detection.
-        any_detect = (
-            (det_l is not None and not det_l.partial)
-            or (det_r is not None and not det_r.partial)
+        any_detect = (det_l is not None and not det_l.partial) or (
+            det_r is not None and not det_r.partial
         )
         if any_detect and self._calib_auto_check.isChecked() and self._calib_worker is None:
             elapsed = time.monotonic() - self._last_auto_capture_time
@@ -2260,7 +2183,7 @@ class CaptureTab(QWidget):
                 self._calib_right_dets.append(det_r)
                 cell_l = _cell_for(det_l.img_pts)
                 cell_r = _cell_for(det_r.img_pts)
-                self._calib_left_grid[cell_l]  = self._calib_left_grid.get(cell_l, 0)  + 1
+                self._calib_left_grid[cell_l] = self._calib_left_grid.get(cell_l, 0) + 1
                 self._calib_right_grid[cell_r] = self._calib_right_grid.get(cell_r, 0) + 1
                 added_to.append("STEREO+L+R")
                 stereo_added = True
@@ -2271,7 +2194,7 @@ class CaptureTab(QWidget):
         if not stereo_added:
             if l_full:
                 if cov_l < min_cov:
-                    skipped_msg.append(f"L too small ({cov_l*100:.0f}%)")
+                    skipped_msg.append(f"L too small ({cov_l * 100:.0f}%)")
                 else:
                     cell = _cell_for(det_l.img_pts)
                     if self._calib_left_grid.get(cell, 0) >= max_per:
@@ -2282,7 +2205,7 @@ class CaptureTab(QWidget):
                         added_to.append("L")
             if r_full:
                 if cov_r < min_cov:
-                    skipped_msg.append(f"R too small ({cov_r*100:.0f}%)")
+                    skipped_msg.append(f"R too small ({cov_r * 100:.0f}%)")
                 else:
                     cell = _cell_for(det_r.img_pts)
                     if self._calib_right_grid.get(cell, 0) >= max_per:
@@ -2295,8 +2218,7 @@ class CaptureTab(QWidget):
         if added_to:
             self._last_auto_capture_time = time.monotonic()
             self._calib_status_label.setText(
-                f"<span style='color:#2ecc71'>✓ Captured: "
-                f"{' + '.join(added_to)}</span>"
+                f"<span style='color:#2ecc71'>✓ Captured: {' + '.join(added_to)}</span>"
             )
         elif skipped_msg:
             self._calib_status_label.setText(
@@ -2325,14 +2247,9 @@ class CaptureTab(QWidget):
         # Calibration is runnable when:
         #   • Stereo pile has ≥ 6 (extrinsics)
         #   • Each intrinsics pile has ≥ 6 (otherwise per-camera K is unreliable)
-        ready = (
-            n_s >= 6 and n_l >= 6 and n_r >= 6
-            and self._calib_worker is None
-        )
+        ready = n_s >= 6 and n_l >= 6 and n_r >= 6 and self._calib_worker is None
         self._calib_run_btn.setEnabled(ready)
-        self._calib_run_btn.setText(
-            f"▶  Run Calibration  (L:{n_l} R:{n_r} pairs:{n_s})"
-        )
+        self._calib_run_btn.setText(f"▶  Run Calibration  (L:{n_l} R:{n_r} pairs:{n_s})")
 
     def _on_calib_clear(self) -> None:
         n_l = len(self._calib_left_dets)
@@ -2450,9 +2367,7 @@ class CaptureTab(QWidget):
             rms = q.get("rms")
             n_frames = q.get("n_frames_used", "?")
             T = calib.get("T")
-            baseline_str = (
-                f"{float(np.linalg.norm(T)) * 100:.1f} cm" if T is not None else "?"
-            )
+            baseline_str = f"{float(np.linalg.norm(T)) * 100:.1f} cm" if T is not None else "?"
             if rms is not None:
                 if rms < 0.5:
                     color, rating = "#2ecc71", "Excellent"
@@ -2512,38 +2427,24 @@ class CaptureTab(QWidget):
     # ------------------------------------------------------------------
 
     def _build_source(self):
-        if self._radio_flir.isChecked():
-            serial_l = self._left_combo.currentText().strip() or None
-            serial_r = self._right_combo.currentText().strip() or None
-            if serial_l and serial_r and serial_l == serial_r:
-                QMessageBox.warning(
-                    self,
-                    "Same serial for both cameras",
-                    "Left and right cameras have the same serial number. "
-                    "Select different cameras in Step 3.",
-                )
-                return None
-            from app.capture.flir import FlirCapture
-
-            return FlirCapture(
-                serial_left=serial_l,
-                serial_right=serial_r,
-                fps=self._fps_spin.value(),
-                exposure_us=self._exposure_spin.value(),
-                gain_db=self._gain_spin.value(),
-                sync=self._sync_check.isChecked(),
-                primary="left" if self._primary_left.isChecked() else "right",
+        serial_l = self._left_combo.currentText().strip() or None
+        serial_r = self._right_combo.currentText().strip() or None
+        if serial_l and serial_r and serial_l == serial_r:
+            QMessageBox.warning(
+                self,
+                "Same serial for both cameras",
+                "Left and right cameras have the same serial number. "
+                "Select different cameras in Step 3.",
             )
-        else:
-            left = self._sim_left.text().strip()
-            right = self._sim_right.text().strip()
-            if not left or not right:
-                QMessageBox.warning(
-                    self,
-                    "Missing video paths",
-                    "Select left and right video files for the simulator.",
-                )
-                return None
-            from app.capture.simulator import VideoSimulator
+            return None
+        from app.capture.flir import FlirCapture
 
-            return VideoSimulator(left, right, realtime=True, loop=self._sim_loop.isChecked())
+        return FlirCapture(
+            serial_left=serial_l,
+            serial_right=serial_r,
+            fps=self._fps_spin.value(),
+            exposure_us=self._exposure_spin.value(),
+            gain_db=self._gain_spin.value(),
+            sync=self._sync_check.isChecked(),
+            primary="left" if self._primary_left.isChecked() else "right",
+        )

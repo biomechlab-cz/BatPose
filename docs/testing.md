@@ -19,7 +19,6 @@ tests/
 │   ├── test_calib_cli.py     # Calibration CLI argument parsing
 │   ├── test_frame_select.py  # Coverage score for calibration frame selection
 │   ├── test_recon3d_cli.py   # Recon3D CLI argument parsing
-│   ├── test_simulator.py     # VideoSimulator start/cleanup and fps guard
 │   ├── test_smooth.py        # OneEuro filter + smooth_trajectory
 │   ├── test_stereo.py        # calibrate_stereo + load_calibration validation
 │   └── test_triangulate.py   # DLT triangulation + reprojection error (noiseless + noisy)

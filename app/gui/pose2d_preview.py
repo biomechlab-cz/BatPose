@@ -21,10 +21,22 @@ if TYPE_CHECKING:
 
 # COCO-17 edges (kept in sync with viewer3d.COCO17_EDGES).
 COCO17_EDGES = [
-    (0, 1), (0, 2), (1, 3), (2, 4),
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
-    (5, 11), (6, 12), (11, 12),
-    (11, 13), (13, 15), (12, 14), (14, 16),
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (2, 4),
+    (5, 6),
+    (5, 7),
+    (7, 9),
+    (6, 8),
+    (8, 10),
+    (5, 11),
+    (6, 12),
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
 ]
 _LEFT_JOINTS = {1, 3, 5, 7, 9, 11, 13, 15}
 _RIGHT_JOINTS = {2, 4, 6, 8, 10, 12, 14, 16}
@@ -122,8 +134,7 @@ class Pose2DPreview(QWidget):
         lbl.setFixedSize(self.PREVIEW_W, self.PREVIEW_H)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setStyleSheet(
-            "background-color: #1e1e1e; color: #888; font-size: 11px; "
-            "border: 1px solid #333;"
+            "background-color: #1e1e1e; color: #888; font-size: 11px; border: 1px solid #333;"
         )
         return lbl
 
@@ -209,12 +220,22 @@ class Pose2DPreview(QWidget):
     def show_frame(self, t: int) -> None:
         """Seek (or step) both sides to frame *t* and refresh the labels."""
         self._render_side(
-            self._cap_l, self._kps_l, self._conf_l, self._n_frames_l,
-            t, self._left_lbl, "_last_t_l",
+            self._cap_l,
+            self._kps_l,
+            self._conf_l,
+            self._n_frames_l,
+            t,
+            self._left_lbl,
+            "_last_t_l",
         )
         self._render_side(
-            self._cap_r, self._kps_r, self._conf_r, self._n_frames_r,
-            t, self._right_lbl, "_last_t_r",
+            self._cap_r,
+            self._kps_r,
+            self._conf_r,
+            self._n_frames_r,
+            t,
+            self._right_lbl,
+            "_last_t_r",
         )
 
     # ------------------------------------------------------------------

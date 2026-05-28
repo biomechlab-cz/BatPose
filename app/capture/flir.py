@@ -43,6 +43,7 @@ _log = logging.getLogger(__name__)
 # Module-level sync helpers — call after cam.Init(), before BeginAcquisition
 # ---------------------------------------------------------------------------
 
+
 def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
     """Pin photometric settings so both stereo cameras produce comparable images.
 
@@ -96,20 +97,20 @@ def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
             _log.debug("photometric[%s]: %s not settable (%s)", label, name, exc)
 
     # --- PixelFormat: force identical Bayer format on both cameras ----------
-    _try("PixelFormat BayerRG8",
-         lambda: cam.PixelFormat.SetValue(PySpin.PixelFormat_BayerRG8))
+    _try("PixelFormat BayerRG8", lambda: cam.PixelFormat.SetValue(PySpin.PixelFormat_BayerRG8))
 
     # --- AdcBitDepth: same on both (12-bit if supported) --------------------
-    _try("AdcBitDepth Bit12",
-         lambda: cam.AdcBitDepth.SetValue(PySpin.AdcBitDepth_Bit12))
+    _try("AdcBitDepth Bit12", lambda: cam.AdcBitDepth.SetValue(PySpin.AdcBitDepth_Bit12))
 
     # --- Gain: disable auto, set fixed value (same on both cameras) ----------
     _try("GainAuto Off", lambda: cam.GainAuto.SetValue(PySpin.GainAuto_Off))
     _try(f"Gain {gain_db} dB", lambda: cam.Gain.SetValue(float(gain_db)))
 
     # --- BlackLevel: zero pedestal on both ----------------------------------
-    _try("BlackLevelSelector All",
-         lambda: cam.BlackLevelSelector.SetValue(PySpin.BlackLevelSelector_All))
+    _try(
+        "BlackLevelSelector All",
+        lambda: cam.BlackLevelSelector.SetValue(PySpin.BlackLevelSelector_All),
+    )
     _try("BlackLevel 0.0", lambda: cam.BlackLevel.SetValue(0.0))
 
     # --- Gamma: enable, identical value on both -----------------------------
@@ -125,12 +126,11 @@ def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
     # we still attempt to disable it AND we bypass PySpin's img.Convert()
     # in _acquire() so the CCM state cannot affect the displayed image
     # regardless of whether this write succeeds.
-    _try("ColorTransformationEnable False",
-         lambda: cam.ColorTransformationEnable.SetValue(False))
+    _try("ColorTransformationEnable False", lambda: cam.ColorTransformationEnable.SetValue(False))
 
     # --- Saturation / Hue: identical digital values if exposed -------------
     _try("Saturation 1.0", lambda: cam.Saturation.SetValue(1.0))
-    _try("Hue 0.0",        lambda: cam.Hue.SetValue(0.0))
+    _try("Hue 0.0", lambda: cam.Hue.SetValue(0.0))
 
     # --- ISP master enable: keep ON; off would bypass demosaic entirely ----
     _try("IspEnable True", lambda: cam.IspEnable.SetValue(True))
@@ -148,8 +148,10 @@ def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
     # Continuous here; _warmup_white_balance() (called after BeginAcquisition)
     # lets it settle for a fixed number of frames and then switches it to Off,
     # freezing each camera's converged ratios so they don't drift mid-session.
-    _try("BalanceWhiteAuto Continuous",
-         lambda: cam.BalanceWhiteAuto.SetValue(PySpin.BalanceWhiteAuto_Continuous))
+    _try(
+        "BalanceWhiteAuto Continuous",
+        lambda: cam.BalanceWhiteAuto.SetValue(PySpin.BalanceWhiteAuto_Continuous),
+    )
 
     # --- Sharpening: try to disable; node is often read-only on BlackflyS ---
     # SharpeningEnable is frequently locked unless SharpeningAvailable is True
@@ -157,28 +159,23 @@ def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
     # one entirely.
     _try("SharpeningEnable False", lambda: cam.SharpeningEnable.SetValue(False))
     if hasattr(PySpin, "SharpeningAuto_Off"):
-        _try("SharpeningAuto Off",
-             lambda: cam.SharpeningAuto.SetValue(PySpin.SharpeningAuto_Off))
+        _try("SharpeningAuto Off", lambda: cam.SharpeningAuto.SetValue(PySpin.SharpeningAuto_Off))
 
     # --- LUT: disable (per-camera luminance LUT from a previous SpinView
     #     session is a classic cause of "one camera permanently darker") -----
     _try("LUTEnable False", lambda: cam.LUTEnable.SetValue(False))
 
     # --- ExposureMode: Timed (not TriggerWidth) -----------------------------
-    _try("ExposureMode Timed",
-         lambda: cam.ExposureMode.SetValue(PySpin.ExposureMode_Timed))
+    _try("ExposureMode Timed", lambda: cam.ExposureMode.SetValue(PySpin.ExposureMode_Timed))
 
     # --- Defect-pixel correction: enabled and same on both ------------------
-    _try("DefectCorrectStaticEnable True",
-         lambda: cam.DefectCorrectStaticEnable.SetValue(True))
+    _try("DefectCorrectStaticEnable True", lambda: cam.DefectCorrectStaticEnable.SetValue(True))
 
     # --- Binning / decimation: 1× on both (any difference is a 2-4× scale) --
     _try("BinningHorizontal 1", lambda: cam.BinningHorizontal.SetValue(1))
-    _try("BinningVertical 1",   lambda: cam.BinningVertical.SetValue(1))
-    _try("DecimationHorizontal 1",
-         lambda: cam.DecimationHorizontal.SetValue(1))
-    _try("DecimationVertical 1",
-         lambda: cam.DecimationVertical.SetValue(1))
+    _try("BinningVertical 1", lambda: cam.BinningVertical.SetValue(1))
+    _try("DecimationHorizontal 1", lambda: cam.DecimationHorizontal.SetValue(1))
+    _try("DecimationVertical 1", lambda: cam.DecimationVertical.SetValue(1))
 
     # --- Full-sensor ROI on both cameras ------------------------------------
     # A previous SpinView session can leave one camera with a cropped ROI
@@ -194,11 +191,10 @@ def _lock_image_processing(cam, gain_db: float = 0.0, label: str = "?") -> None:
     try:
         max_w = cam.WidthMax.GetValue()
         max_h = cam.HeightMax.GetValue()
-        _try(f"Width {max_w}",  lambda: cam.Width.SetValue(max_w))
+        _try(f"Width {max_w}", lambda: cam.Width.SetValue(max_w))
         _try(f"Height {max_h}", lambda: cam.Height.SetValue(max_h))
     except Exception as exc:
         _log.debug("photometric[%s]: WidthMax/HeightMax unavailable (%s)", label, exc)
-
 
 
 def _set_newest_only_buffer(cam, label: str = "?") -> None:
@@ -232,13 +228,16 @@ def _set_newest_only_buffer(cam, label: str = "?") -> None:
             _log.debug("buffer[%s]: NewestOnly entry not available", label)
             return
         node.SetIntValue(entry.GetValue())
-        _log.info("buffer[%s]: StreamBufferHandlingMode = %s",
-                  label, node.GetCurrentEntry().GetSymbolic())
+        _log.info(
+            "buffer[%s]: StreamBufferHandlingMode = %s", label, node.GetCurrentEntry().GetSymbolic()
+        )
     except Exception as exc:
         _log.debug("buffer[%s]: failed to set NewestOnly (%s)", label, exc)
 
 
-def _configure_freerun(cam, fps: float, exposure_us: float, gain_db: float = 10.0, label: str = "?") -> None:
+def _configure_freerun(
+    cam, fps: float, exposure_us: float, gain_db: float = 10.0, label: str = "?"
+) -> None:
     """Free-running continuous acquisition; no hardware trigger."""
     import PySpin
 
@@ -259,7 +258,9 @@ def _configure_freerun(cam, fps: float, exposure_us: float, gain_db: float = 10.
     _log.debug("freerun: done")
 
 
-def _configure_primary(cam, fps: float, exposure_us: float, gain_db: float = 10.0, label: str = "primary") -> None:
+def _configure_primary(
+    cam, fps: float, exposure_us: float, gain_db: float = 10.0, label: str = "primary"
+) -> None:
     """
     Primary camera (BlackflyS): free-runs at *fps* and outputs ExposureActive
     on Line 1 (pin 4, white wire — the opto-isolated output) to trigger the
@@ -308,7 +309,9 @@ def _configure_primary(cam, fps: float, exposure_us: float, gain_db: float = 10.
     _log.debug("primary: done")
 
 
-def _configure_secondary(cam, exposure_us: float, gain_db: float = 10.0, label: str = "secondary") -> None:
+def _configure_secondary(
+    cam, exposure_us: float, gain_db: float = 10.0, label: str = "secondary"
+) -> None:
     """
     Secondary camera: waits for a rising-edge hardware trigger on Line 3.
     TriggerOverlap_ReadOut keeps throughput high by accepting a new trigger
@@ -374,6 +377,7 @@ def list_camera_serials() -> list[str]:
 # FlirCapture
 # ---------------------------------------------------------------------------
 
+
 class FlirCapture(BaseCapture):
     """
     Live stereo capture from two FLIR cameras using the PySpin (Spinnaker) SDK.
@@ -415,7 +419,7 @@ class FlirCapture(BaseCapture):
         self._primary = primary  # "left" or "right"
 
         self._system = None
-        self._cam_list = None   # kept alive until stop() to satisfy PySpin refcounting
+        self._cam_list = None  # kept alive until stop() to satisfy PySpin refcounting
         self._cam_left = None
         self._cam_right = None
         self._frame_idx = 0
@@ -429,7 +433,10 @@ class FlirCapture(BaseCapture):
 
         _log.info(
             "start: sync=%s primary=%s fps=%s exposure_us=%s",
-            self._sync, self._primary, self._fps_val, self._exposure_us,
+            self._sync,
+            self._primary,
+            self._fps_val,
+            self._exposure_us,
         )
 
         _log.debug("start: GetInstance")
@@ -487,10 +494,12 @@ class FlirCapture(BaseCapture):
         if self._sync:
             prim = self._cam_left if self._primary == "left" else self._cam_right
             sec = self._cam_right if self._primary == "left" else self._cam_left
-            prim_label = self._primary               # "left" or "right"
+            prim_label = self._primary  # "left" or "right"
             sec_label = "right" if self._primary == "left" else "left"
             _log.debug("start: configure primary (%s)", prim_label)
-            _configure_primary(prim, self._fps_val, self._exposure_us, self._gain_db, label=prim_label)
+            _configure_primary(
+                prim, self._fps_val, self._exposure_us, self._gain_db, label=prim_label
+            )
             _log.debug("start: configure secondary (%s)", sec_label)
             _configure_secondary(sec, self._exposure_us, self._gain_db, label=sec_label)
             # Secondary must begin acquisition before primary sends its first trigger
@@ -501,7 +510,9 @@ class FlirCapture(BaseCapture):
         else:
             for label, cam in (("left", self._cam_left), ("right", self._cam_right)):
                 _log.debug("start: configure freerun %s", label)
-                _configure_freerun(cam, self._fps_val, self._exposure_us, self._gain_db, label=label)
+                _configure_freerun(
+                    cam, self._fps_val, self._exposure_us, self._gain_db, label=label
+                )
                 _log.debug("start: BeginAcquisition %s", label)
                 cam.BeginAcquisition()
 
@@ -562,8 +573,7 @@ class FlirCapture(BaseCapture):
                     red = cam.BalanceRatio.GetValue()
                     cam.BalanceRatioSelector.SetValue(PySpin.BalanceRatioSelector_Blue)
                     blue = cam.BalanceRatio.GetValue()
-                    _log.info("white-balance[%s] frozen: Red=%.3f Blue=%.3f",
-                              label, red, blue)
+                    _log.info("white-balance[%s] frozen: Red=%.3f Blue=%.3f", label, red, blue)
                 except Exception:
                     pass
             except Exception as exc:
@@ -628,14 +638,14 @@ class FlirCapture(BaseCapture):
         # clearing instance attributes immediately, then del-ing every local.
 
         _log.debug("stop: snapshot refs → locals")
-        cam_left  = self._cam_left
+        cam_left = self._cam_left
         cam_right = self._cam_right
-        cam_list  = self._cam_list
-        system    = self._system
-        self._cam_left  = None
+        cam_list = self._cam_list
+        system = self._system
+        self._cam_left = None
         self._cam_right = None
-        self._cam_list  = None
-        self._system    = None
+        self._cam_list = None
+        self._system = None
 
         _log.debug("stop: EndAcquisition")
         for cam in filter(None, (cam_left, cam_right)):
@@ -726,10 +736,10 @@ class FlirCapture(BaseCapture):
                     # OpenCV names the first two pixels of the SECOND row.
                     # Result: every PySpin name maps to the "opposite" OpenCV code.
                     _bayer_map = {
-                        "BayerRG8":  cv2.COLOR_BAYER_BG2BGR,  # BlackflyS default
-                        "BayerGB8":  cv2.COLOR_BAYER_GR2BGR,
-                        "BayerGR8":  cv2.COLOR_BAYER_GB2BGR,
-                        "BayerBG8":  cv2.COLOR_BAYER_RG2BGR,
+                        "BayerRG8": cv2.COLOR_BAYER_BG2BGR,  # BlackflyS default
+                        "BayerGB8": cv2.COLOR_BAYER_GR2BGR,
+                        "BayerGR8": cv2.COLOR_BAYER_GB2BGR,
+                        "BayerBG8": cv2.COLOR_BAYER_RG2BGR,
                         "BayerRG16": cv2.COLOR_BAYER_BG2BGR,
                         "BayerGB16": cv2.COLOR_BAYER_GR2BGR,
                         "BayerGR16": cv2.COLOR_BAYER_GB2BGR,
@@ -787,7 +797,7 @@ class FlirCapture(BaseCapture):
         # was silently discarded by the NewestOnly stream buffer.
         expected_ns = int(1_000_000_000 / self._fps_val)
         for prev, cur in (
-            (self._last_ts_left_ns,  ts_l),
+            (self._last_ts_left_ns, ts_l),
             (self._last_ts_right_ns, ts_r),
         ):
             if prev is not None and cur is not None and cur > prev:

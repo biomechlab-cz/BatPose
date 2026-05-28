@@ -166,18 +166,6 @@ with FlirCapture(serial_left="12345678", serial_right="87654321") as cap:
         # frame.frame_left, frame.frame_right, frame.timestamp
 ```
 
-If FLIR is **not** available, use the `VideoSimulator` for testing:
-
-```python
-from app.capture.simulator import VideoSimulator
-
-with VideoSimulator("left.mp4", "right.mp4", realtime=True) as cap:
-    while True:
-        frame = cap.read()
-        if frame is None:
-            break
-```
-
 ---
 
 ## Caching
