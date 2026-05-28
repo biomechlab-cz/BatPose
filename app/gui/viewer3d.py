@@ -187,10 +187,24 @@ class SkeletonViewer3D(QWidget):
         """
         Load a new skeleton sequence.
 
+        The incoming data is in OpenCV camera-1 coordinates (X right, Y down,
+        Z forward — the raw output of the triangulation pipeline).  We transform
+        to the viewer's Z-up world frame so the skeleton appears upright and the
+        axis legend (X lateral, Y anterior, Z vertical-up) is correct:
+
+            viewer.X =  cam.X   (lateral, right positive)
+            viewer.Y =  cam.Z   (anterior / depth)
+            viewer.Z = -cam.Y   (vertical, up positive)
+
         Args:
-            joints3d: float32 [T, P, 17, 3] — 3D positions in metres
+            joints3d: float32 [T, P, 17, 3] — 3D positions in metres (camera frame)
             conf3d:   float32 [T, P, 17]    — confidence [0, 1]
         """
+        joints3d = np.nan_to_num(joints3d, nan=0.0, posinf=0.0, neginf=0.0)
+        # OpenCV camera → Z-up world frame (same transform as live mode in set_frame)
+        j = joints3d
+        joints3d = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1).astype(np.float32)
+
         self._joints3d = joints3d
         self._conf3d = conf3d
         if joints3d.ndim == 4:
@@ -201,6 +215,7 @@ class SkeletonViewer3D(QWidget):
         self._current_frame = 0
         self._rebuild_items()
         self.show_frame(0)
+        self._fit_camera_to_data()
 
     def eventFilter(self, obj, event) -> bool:  # noqa: D401
         """Emit *clicked* on a no-drag left click and *double_clicked* on dbl-click.
@@ -250,15 +265,14 @@ class SkeletonViewer3D(QWidget):
         # items raise "Error while drawing item" for every such frame.  Replace
         # non-finite values with 0 so the canvas stays drawable.
         joints = np.nan_to_num(joints, nan=0.0, posinf=0.0, neginf=0.0)
-        # In live mode, the triangulator hands us points in the left-camera
-        # OpenCV frame (X right, Y DOWN, Z forward).  Swap to a Z-up world
-        # frame so the person appears standing upright in the viewer:
-        #     viewer.x = cv.x  (right)
-        #     viewer.y = cv.z  (forward / depth)
-        #     viewer.z = -cv.y (up — flip the downward axis)
-        if self._live_mode:
-            j = joints
-            joints = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
+        # The triangulator returns points in the left-camera OpenCV frame
+        # (X right, Y DOWN, Z forward).  Convert to the viewer's Z-up world
+        # frame so the person appears standing upright:
+        #     viewer.X =  cv.X  (right / lateral)
+        #     viewer.Y =  cv.Z  (forward / anterior)
+        #     viewer.Z = -cv.Y  (up — flip the downward Y axis)
+        j = joints
+        joints = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
         # Only rebuild GL items if the person count changed; otherwise just
         # update in-place — rebuilding allocates new line/scatter items per
         # call and is too expensive for live tracking at 5-10 Hz.
@@ -357,6 +371,36 @@ class SkeletonViewer3D(QWidget):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _fit_camera_to_data(self) -> None:
+        """Position the camera to frame all detected joints after set_data().
+
+        Computes the centroid and bounding-box span of all joints with
+        confidence > 0.1 and sets the camera to orbit that point from a
+        comfortable distance.  Falls back gracefully if pyqtgraph or
+        the data are unavailable.
+        """
+        if self._gl is None or self._joints3d is None or self._conf3d is None:
+            return
+        # Flatten over time and persons; select detected joints only.
+        mask = self._conf3d.reshape(-1) > 0.1
+        pts = self._joints3d.reshape(-1, 3)[mask]
+        if len(pts) == 0:
+            return
+        center = pts.mean(axis=0).astype(float)
+        span = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+        distance = max(2.0, span * 1.5)
+        try:
+            from pyqtgraph import Vector  # noqa: PLC0415
+
+            self._glview.setCameraPosition(
+                pos=Vector(float(center[0]), float(center[1]), float(center[2])),
+                distance=distance,
+                elevation=20,
+                azimuth=45,
+            )
+        except Exception:
+            self._glview.setCameraPosition(distance=distance, elevation=20, azimuth=45)
 
     def _rebuild_items(self) -> None:
         """Remove old GL items and create fresh ones for current P."""

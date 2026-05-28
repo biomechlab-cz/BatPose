@@ -11,6 +11,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -71,6 +72,10 @@ class ReconTab(QWidget):
         self._pose3d_path: str | None = None
         self._pose2d_left_path: str | None = None
         self._pose2d_right_path: str | None = None
+        # Deferred pose3d path: set when set_project_dir() is called before the
+        # widget is first shown (GL context not yet created).  Processed in
+        # showEvent() once the GL context is ready.
+        self._pending_pose3d_path: str | None = None
         self._playing = False
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_timer_tick)
@@ -88,13 +93,47 @@ class ReconTab(QWidget):
             if calib.exists():
                 self._calib_edit.setText(str(calib))
         pose3d = d / "pose3d.npz"
-        if not self._out_edit.text():
+        current_out = self._out_edit.text().strip()
+        # Set project-folder default whenever output path is empty or still
+        # shows the bare relative placeholder "pose3d.npz".
+        if not current_out or current_out == "pose3d.npz":
             self._out_edit.setText(str(pose3d))
+
+        # Auto-detect pose2d NPZ files so the 2D preview is populated even when
+        # no pose3d.npz exists yet (e.g. fresh project where only the 2D
+        # extraction has been run, or after replacing a recording).
+        p2d_l = d / "pose2d_left.npz"
+        p2d_r = d / "pose2d_right.npz"
+        if p2d_l.exists() and not self._pose2d_left_path:
+            self._pose2d_left_path = str(p2d_l)
+        if p2d_r.exists() and not self._pose2d_right_path:
+            self._pose2d_right_path = str(p2d_r)
 
         # Auto-load any existing reconstruction so the user can view results
         # immediately without re-running the pipeline.
+        # Guard: pyqtgraph's GLViewWidget.addItem() calls makeCurrent() which
+        # fails before the widget is first shown (GL context not yet created).
+        # If not visible yet, store the path and defer until showEvent().
         if pose3d.exists():
-            self._try_auto_load_pose3d(str(pose3d))
+            if self.isVisible():
+                self._try_auto_load_pose3d(str(pose3d))
+            else:
+                self._pending_pose3d_path = str(pose3d)
+
+    def showEvent(self, event) -> None:
+        """Process any deferred pose3d load the first time the tab is shown.
+
+        set_project_dir() is called during session restore, before the main
+        window is shown, so the GL context does not yet exist.  Rather than
+        calling _load_pose3d() immediately (which would try to add GL items
+        before makeCurrent() succeeds), we stash the path and process it here
+        via a zero-timeout singleShot so we run after the first paintGL().
+        """
+        super().showEvent(event)
+        if self._pending_pose3d_path is not None:
+            path = self._pending_pose3d_path
+            self._pending_pose3d_path = None
+            QTimer.singleShot(0, lambda: self._try_auto_load_pose3d(path))
 
     def set_calibration(self, calib_path: str) -> None:
         """Auto-fill calibration path (called from calibration tab signal)."""
@@ -213,16 +252,26 @@ class ReconTab(QWidget):
         self._max_reproj.setDecimals(1)
         oform.addRow("Max reproj err:", self._max_reproj)
 
+        self._smooth_check = QCheckBox("Apply temporal smoothing (1€ filter)")
+        self._smooth_check.setChecked(True)
+        self._smooth_check.setToolTip(
+            "When checked, the OneEuro filter smooths the 3D trajectories after "
+            "triangulation.  Uncheck to get raw, frame-by-frame positions — "
+            "useful for fast movements where smoothing introduces lag."
+        )
+        self._smooth_check.toggled.connect(self._on_smooth_toggled)
+        oform.addRow("Smoothing:", self._smooth_check)
+
         self._min_cutoff = QDoubleSpinBox()
         self._min_cutoff.setRange(0.01, 10.0)
-        self._min_cutoff.setValue(0.5)
+        self._min_cutoff.setValue(1.0)   # less aggressive: was 0.5 Hz
         self._min_cutoff.setSuffix(" Hz")
         self._min_cutoff.setDecimals(2)
         oform.addRow("1€ min_cutoff:", self._min_cutoff)
 
         self._beta = QDoubleSpinBox()
         self._beta.setRange(0.0, 10.0)
-        self._beta.setValue(0.05)
+        self._beta.setValue(0.5)         # less aggressive: was 0.05
         self._beta.setDecimals(3)
         oform.addRow("1€ beta:", self._beta)
 
@@ -235,17 +284,17 @@ class ReconTab(QWidget):
 
         ctrl_layout.addWidget(opt_group)
 
-        # Output
+        # Output — label removed so the edit box fills the full group width
         out_group = QGroupBox("Output")
-        outform = QFormLayout(out_group)
-        self._out_edit = QLineEdit("pose3d.npz")
+        out_inner = QHBoxLayout(out_group)
+        out_inner.setContentsMargins(6, 4, 6, 4)
+        self._out_edit = QLineEdit()
+        self._out_edit.setPlaceholderText("pose3d.npz (set when project is loaded)")
         btn_out = QPushButton("…")
         btn_out.setFixedWidth(30)
         btn_out.clicked.connect(self._browse_output)
-        row_out = QHBoxLayout()
-        row_out.addWidget(self._out_edit)
-        row_out.addWidget(btn_out)
-        outform.addRow("pose3d.npz:", row_out)
+        out_inner.addWidget(self._out_edit)
+        out_inner.addWidget(btn_out)
         ctrl_layout.addWidget(out_group)
 
         ctrl_layout.addStretch()
@@ -379,6 +428,12 @@ class ReconTab(QWidget):
     # File dialogs
     # ------------------------------------------------------------------
 
+    def _on_smooth_toggled(self, checked: bool) -> None:
+        """Enable / disable the 1€ filter parameter spinboxes."""
+        self._min_cutoff.setEnabled(checked)
+        self._beta.setEnabled(checked)
+        self._d_cutoff.setEnabled(checked)
+
     def _validate_inputs(self) -> None:
         """Enable Run button when all required paths are non-empty and exist."""
         left = self._left_edit.text().strip()
@@ -402,6 +457,16 @@ class ReconTab(QWidget):
             self._run_btn.setToolTip("")
             # Auto-load a pre-existing reconstruction so the user can skip re-running.
             self._try_auto_load_pose3d()
+            # Refresh the 2D preview now that valid video paths are confirmed.
+            # Fire whenever pose2d *or* pose3d data is already loaded — this
+            # covers two cases:
+            #   1. Session restore: set_project_dir() detected pose2d / pose3d
+            #      before _left_edit/_right_edit were populated; the first
+            #      _refresh_2d_preview() call had empty video paths.
+            #   2. Fresh project with pose2d but no pose3d yet: user wants to
+            #      inspect 2D detections before running 3D reconstruction.
+            if self._pose3d_path is not None or self._pose2d_left_path is not None:
+                self._refresh_2d_preview()
         else:
             missing = []
             if not left_ok:
@@ -568,7 +633,8 @@ class ReconTab(QWidget):
             out_dir = Path(left).parent
             out_left = str(out_dir / "pose2d_left.npz")
             out_right = str(out_dir / "pose2d_right.npz")
-            out_3d = self._out_edit.text().strip() or str(out_dir / "pose3d.npz")
+            _raw_out = self._out_edit.text().strip()
+            out_3d = _raw_out if _raw_out else str(out_dir / "pose3d.npz")
 
         self._out_3d = out_3d
         # Remember pose2d locations so the 2D preview can pick them up after the
@@ -651,6 +717,7 @@ class ReconTab(QWidget):
             min_cutoff=self._min_cutoff.value(),
             beta=self._beta.value(),
             d_cutoff=self._d_cutoff.value(),
+            no_smooth=not self._smooth_check.isChecked(),
         )
         self._recon_worker.progress.connect(self._on_progress)
         self._recon_worker.finished.connect(self._on_pipeline_done)

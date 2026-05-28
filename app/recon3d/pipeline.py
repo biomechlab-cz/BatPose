@@ -21,9 +21,10 @@ def reconstruct3d(
     output_path: str,
     min_conf: float = 0.3,
     max_reproj_err: float = 20.0,
-    min_cutoff: float = 0.5,
-    beta: float = 0.05,
+    min_cutoff: float = 1.0,
+    beta: float = 0.5,
     d_cutoff: float = 1.0,
+    no_smooth: bool = False,
     progress_cb: Callable[[int, str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> str | None:
@@ -36,7 +37,7 @@ def reconstruct3d(
     3. Triangulate via DLT
     4. Compute reprojection error in pixel space
     5. Outlier rejection (low conf or high reproj error → conf3d = 0)
-    6. OneEuro temporal smoothing
+    6. OneEuro temporal smoothing (skipped when no_smooth=True)
 
     Args:
         calib_path:         path to calibration.yml
@@ -48,6 +49,7 @@ def reconstruct3d(
         min_cutoff:         OneEuro min_cutoff (Hz)
         beta:               OneEuro beta
         d_cutoff:           OneEuro d_cutoff (Hz)
+        no_smooth:          skip temporal smoothing entirely when True
         progress_cb:        (percent, message) callback
         cancel_check:       returns True to abort
 
@@ -177,14 +179,17 @@ def reconstruct3d(
     if cancel_check and cancel_check():
         return None
 
-    if progress_cb:
-        progress_cb(85, "Applying temporal smoothing…")
-
-    # Temporal smoothing per person × joint × coordinate
-    for p in range(P):
-        for j in range(J):
-            traj = joints3d[:, p, j, :]  # [T, 3]
-            joints3d[:, p, j, :] = smooth_trajectory(traj, fps, min_cutoff, beta, d_cutoff)
+    if no_smooth:
+        if progress_cb:
+            progress_cb(85, "Temporal smoothing skipped (disabled).")
+    else:
+        if progress_cb:
+            progress_cb(85, "Applying temporal smoothing…")
+        # Temporal smoothing per person × joint × coordinate
+        for p in range(P):
+            for j in range(J):
+                traj = joints3d[:, p, j, :]  # [T, 3]
+                joints3d[:, p, j, :] = smooth_trajectory(traj, fps, min_cutoff, beta, d_cutoff)
 
     if progress_cb:
         progress_cb(95, "Saving results…")
@@ -201,8 +206,8 @@ def reconstruct3d(
         "skeleton": "coco17",
         "image_size": meta_left.get("image_size", [0, 0]),
         "calibration_file": str(calib_path),
-        "smoothing": "oneeuro",
-        "smooth_params": {"min_cutoff": min_cutoff, "beta": beta, "d_cutoff": d_cutoff},
+        "smoothing": "none" if no_smooth else "oneeuro",
+        "smooth_params": {} if no_smooth else {"min_cutoff": min_cutoff, "beta": beta, "d_cutoff": d_cutoff},
     }
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

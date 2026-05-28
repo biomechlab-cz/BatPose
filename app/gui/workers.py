@@ -120,7 +120,18 @@ class CalibWorker(_BaseWorker):
 
 
 class Pose2DWorker(_BaseWorker):
-    """Run 2D pose extraction for both cameras in sequence."""
+    """Run 2D pose extraction for both cameras in parallel.
+
+    Uses IMAGE (stateless, per-frame) mode for the offline pipeline so that
+    fast-movement frames are analysed independently without MediaPipe's
+    built-in temporal smoothing, which introduces lag on quick gestures.
+    Temporal smoothing is handled explicitly by the OneEuro filter in the
+    3D reconstruction step.
+
+    Both camera videos are processed concurrently in separate threads —
+    IMAGE-mode backends have no cross-frame state so they are fully
+    independent and safe to parallelize.
+    """
 
     def __init__(
         self,
@@ -144,7 +155,11 @@ class Pose2DWorker(_BaseWorker):
         if self._backend_name == "mediapipe":
             from app.pose2d.mediapipe_backend import MediaPipeBackend
 
-            return MediaPipeBackend(num_poses=self._num_poses)
+            # IMAGE (stateless) mode for offline reconstruction: each frame is
+            # analysed independently, which avoids MediaPipe's internal temporal
+            # smoothing that blurs fast-movement keypoints.  Temporal coherence
+            # is restored afterwards by the OneEuro filter in the 3D pipeline.
+            return MediaPipeBackend(num_poses=self._num_poses, running_mode="image")
         elif self._backend_name == "rtmpose":
             from app.pose2d.rtmpose_backend import RTMPoseBackend
 
@@ -153,23 +168,38 @@ class Pose2DWorker(_BaseWorker):
             raise ValueError(f"Unknown backend: {self._backend_name!r}")
 
     def _run(self) -> Any:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
         from app.pose2d.pipeline import process_video, save_pose2d
 
-        results = {}
-        for label, vid, out in [
-            ("left", self._video_left, self._out_left),
-            ("right", self._video_right, self._out_right),
-        ]:
-            if self._cancelled:
-                return None
+        results: dict = {}
+        first_exc: list = []
 
+        # Shared progress state — protected by _lock so the combined value
+        # is always consistent regardless of which thread updates it.
+        _lock = threading.Lock()
+        _pct: dict[str, int] = {"left": 0, "right": 0}
+
+        def _process_one(label: str, vid: str, out: str) -> None:
+            """Process one camera video in its own thread with its own backend."""
             backend = self._make_backend()
             try:
+                _last_milestone: list[int] = [-1]  # per-camera milestone tracker
 
-                def _cb(pct: int, msg: str, lbl: str = label) -> None:
-                    # Map 0-100 to 0-50 for left, 50-100 for right
-                    offset = 0 if lbl == "left" else 50
-                    self._progress(offset + pct // 2, f"[{lbl.upper()}] {msg}")
+                def _cb(pct: int, msg: str) -> None:
+                    # Update this camera's progress and derive the combined
+                    # average so the bar advances smoothly without jumps.
+                    with _lock:
+                        _pct[label] = pct
+                        combined = (_pct["left"] + _pct["right"]) // 2
+                    # Log only at 0 / 25 / 50 / 75 / 100% milestones to
+                    # avoid flooding the log with per-frame messages.
+                    log_msg = ""
+                    milestone = (pct // 25) * 25
+                    if milestone != _last_milestone[0]:
+                        _last_milestone[0] = milestone
+                        log_msg = f"[{label.upper()}] {pct}%  {msg}"
+                    self.progress.emit(combined, log_msg)
 
                 kps, conf, meta = process_video(
                     vid,
@@ -180,9 +210,28 @@ class Pose2DWorker(_BaseWorker):
                 if not self._cancelled:
                     save_pose2d(kps, conf, meta, out)
                     results[label] = out
+                    with _lock:
+                        _pct[label] = 100
+                        combined = (_pct["left"] + _pct["right"]) // 2
+                    self.progress.emit(combined, f"[{label.upper()}] done")
+            except Exception as exc:
+                first_exc.append(exc)
+                raise
             finally:
                 backend.close()
 
+        # Both cameras run concurrently.  Each reports its own 0-100% progress;
+        # the combined average is emitted so the progress bar advances smoothly
+        # and the log only shows milestone lines (not every frame).
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pose2d") as pool:
+            fut_l = pool.submit(_process_one, "left", self._video_left, self._out_left)
+            fut_r = pool.submit(_process_one, "right", self._video_right, self._out_right)
+            # Collect results / re-raise the first exception from either thread.
+            for fut in (fut_l, fut_r):
+                fut.result()
+
+        if self._cancelled:
+            return None
         return results
 
 
@@ -391,9 +440,10 @@ class Recon3DWorker(_BaseWorker):
         output_path: str,
         min_conf: float = 0.3,
         max_reproj_err: float = 20.0,
-        min_cutoff: float = 0.5,
-        beta: float = 0.05,
+        min_cutoff: float = 1.0,
+        beta: float = 0.5,
         d_cutoff: float = 1.0,
+        no_smooth: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -406,6 +456,7 @@ class Recon3DWorker(_BaseWorker):
         self._min_cutoff = min_cutoff
         self._beta = beta
         self._d_cutoff = d_cutoff
+        self._no_smooth = no_smooth
 
     def _run(self) -> Any:
         from app.recon3d.pipeline import reconstruct3d
@@ -420,6 +471,7 @@ class Recon3DWorker(_BaseWorker):
             min_cutoff=self._min_cutoff,
             beta=self._beta,
             d_cutoff=self._d_cutoff,
+            no_smooth=self._no_smooth,
             progress_cb=self._progress,
             cancel_check=self._check_cancelled,
         )

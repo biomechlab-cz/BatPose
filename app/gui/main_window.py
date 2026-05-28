@@ -235,7 +235,13 @@ class MainWindow(QMainWindow):
                 if calib_path := recon.get("calib"):
                     rt._calib_edit.setText(calib_path)
                 if out := recon.get("out"):
-                    rt._out_edit.setText(out)
+                    # Only restore explicit absolute paths.  A bare relative name
+                    # like "pose3d.npz" was written by an old session before the
+                    # project-folder default was introduced; restoring it would
+                    # shadow the correct absolute path that set_project_dir() just
+                    # placed in the field.
+                    if Path(out).is_absolute():
+                        rt._out_edit.setText(out)
 
             if cap := session.get("capture"):
                 self._capture_tab.restore_session(cap)

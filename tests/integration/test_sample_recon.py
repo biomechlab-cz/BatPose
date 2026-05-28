@@ -77,11 +77,12 @@ class TestDetectionQuality:
     def test_at_least_60pct_frames_have_a_detection(self, pose3d):
         """At least 60% of frames must have a pose detection.
 
-        The test rig uses ~46° vergence and fisheye lenses; with MediaPipe
-        VIDEO mode at min_confidence=0.3 the real detection rate on this
-        fixture is ~69%.  60% is a meaningful floor that catches complete
-        failure (e.g., wrong file paths, broken triangulation) while
-        accommodating this rig's occlusion / edge-of-FOV characteristics.
+        The test rig uses ~46° vergence and fisheye lenses; with a clean
+        single-person recording the real detection rate should reach ≥97%
+        (mean reprojection ~6 px, well under the 20 px outlier threshold).
+        60% is a meaningful floor that catches complete failure (e.g. wrong
+        file paths, broken triangulation, or two people in the recording
+        causing each camera to track a different person).
         """
         d, _ = pose3d
         conf3d = d["conf3d"]  # [T, P, 17]

@@ -526,8 +526,8 @@ class CaptureTab(QWidget):
 
         self._left_combo = QComboBox()
         self._right_combo = QComboBox()
-        self._left_combo.currentTextChanged.connect(self._refresh_state)
-        self._right_combo.currentTextChanged.connect(self._refresh_state)
+        self._left_combo.currentTextChanged.connect(self._on_left_camera_changed)
+        self._right_combo.currentTextChanged.connect(self._on_right_camera_changed)
         step3_form.addRow("Left camera serial:", self._left_combo)
         step3_form.addRow("Right camera serial:", self._right_combo)
 
@@ -1155,6 +1155,37 @@ class CaptureTab(QWidget):
         self._right_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
+    # Camera combo mutual-exclusion helpers
+    # ------------------------------------------------------------------
+
+    def _on_left_camera_changed(self, text: str) -> None:
+        """If left camera = right camera, auto-switch right to a different serial.
+
+        Prevents the user from accidentally selecting the same physical camera
+        for both roles, which would produce a degenerate (identical) stereo pair
+        and crash the FLIR acquisition with a duplicate-serial error.
+        """
+        if text and text == self._right_combo.currentText():
+            self._right_combo.blockSignals(True)
+            for i in range(self._right_combo.count()):
+                if self._right_combo.itemText(i) != text:
+                    self._right_combo.setCurrentIndex(i)
+                    break
+            self._right_combo.blockSignals(False)
+        self._refresh_state()
+
+    def _on_right_camera_changed(self, text: str) -> None:
+        """If right camera = left camera, auto-switch left to a different serial."""
+        if text and text == self._left_combo.currentText():
+            self._left_combo.blockSignals(True)
+            for i in range(self._left_combo.count()):
+                if self._left_combo.itemText(i) != text:
+                    self._left_combo.setCurrentIndex(i)
+                    break
+            self._left_combo.blockSignals(False)
+        self._refresh_state()
+
+    # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
 
@@ -1238,6 +1269,10 @@ class CaptureTab(QWidget):
         self._record_btn.setEnabled(True)
         self._calib_mode_btn.setEnabled(True)
         self._pose_mode_btn.setEnabled(True)
+        # Lock camera assignment while streaming — changing serials mid-stream
+        # would cause a mismatched pair without restarting the capture source.
+        self._left_combo.setEnabled(False)
+        self._right_combo.setEnabled(False)
         self._status_label.setText("Streaming…")
 
     def _on_stop(self) -> None:
@@ -1533,6 +1568,9 @@ class CaptureTab(QWidget):
         self._pose_mode_btn.setChecked(False)
         self._pose_panel.setVisible(False)
         self._last_frame = None
+        # Re-enable camera assignment now that streaming has stopped.
+        self._left_combo.setEnabled(True)
+        self._right_combo.setEnabled(True)
         self._refresh_state()
 
     def _on_worker_error(self, msg: str) -> None:
