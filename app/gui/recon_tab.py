@@ -745,8 +745,10 @@ class ReconTab(QWidget):
 
         self._progress_bar.setValue(100)
         self._log_msg(f"\n✓ Done. Output: {result}")
+        # _load_pose3d() emits pose3d_ready on success, so downstream
+        # consumers (Analysis tab) get notified for every successful load —
+        # not only when the pipeline runs end-to-end here.
         self._load_pose3d(str(result))
-        self.pose3d_ready.emit(str(result))
 
     def _on_error(self, tb: str) -> None:
         self._validate_inputs()
@@ -795,6 +797,10 @@ class ReconTab(QWidget):
             self._refresh_2d_preview()
 
             self._log_msg(f"Loaded {path} — {T} frames, {joints3d.shape[1]} person(s)")
+            # Notify downstream consumers (Analysis tab) that fresh data is
+            # available — applies to auto-load on startup, manual file open
+            # via the "Load pose3d.npz…" button, *and* pipeline completion.
+            self.pose3d_ready.emit(path)
         except Exception as e:
             self._log_msg(f"Failed to load {path}: {e}")
 

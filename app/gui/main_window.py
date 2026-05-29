@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .analysis_tab import AnalysisTab
 from .calib_tab import CalibTab
 from .capture_tab import CaptureTab
 from .recon_tab import ReconTab
@@ -75,14 +76,18 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._calib_tab = CalibTab()
         self._recon_tab = ReconTab()
+        self._analysis_tab = AnalysisTab()
         self._capture_tab = CaptureTab()
 
         # Live Capture first — it's the primary workflow (calibrate live, then
         # track live).  Reconstruction comes next as it's used more often than
         # offline Calibration (calibration is typically done during live
-        # capture); offline Calibration stays last for pre-recorded videos.
+        # capture); Analysis follows reconstruction so the user can inspect
+        # joint angles right after the pipeline finishes; offline Calibration
+        # stays last for pre-recorded videos.
         self._tabs.addTab(self._capture_tab, "Live Capture")
         self._tabs.addTab(self._recon_tab, "Reconstruction / 3D View")
+        self._tabs.addTab(self._analysis_tab, "Analysis")
         self._tabs.addTab(self._calib_tab, "Calibration")
         self.setCentralWidget(self._tabs)
 
@@ -93,6 +98,15 @@ class MainWindow(QMainWindow):
         self._capture_tab.calibration_saved.connect(self._recon_tab.set_calibration)
         self._capture_tab.calibration_saved.connect(self._on_calib_saved)
         self._recon_tab.pose3d_ready.connect(self._on_pose3d_ready)
+        # Feed completed pose3d files into the Analysis tab so joint angles
+        # appear automatically when the pipeline finishes.
+        self._recon_tab.pose3d_ready.connect(self._analysis_tab.load_pose3d)
+        # Bidirectional frame-cursor sync between the 3D viewer's playback
+        # slider and the analysis plot's vertical cursor.  AnalysisTab guards
+        # against the obvious slider→cursor→slider feedback loop internally
+        # via its _suppress_seek_signal flag.
+        self._recon_tab._slider.valueChanged.connect(self._analysis_tab.seek_to_frame)
+        self._analysis_tab.frame_seek.connect(self._recon_tab._slider.setValue)
         self._capture_tab.recording_saved.connect(self._on_recording_saved)
 
         # Status bar
