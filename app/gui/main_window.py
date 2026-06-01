@@ -98,15 +98,21 @@ class MainWindow(QMainWindow):
         self._capture_tab.calibration_saved.connect(self._recon_tab.set_calibration)
         self._capture_tab.calibration_saved.connect(self._on_calib_saved)
         self._recon_tab.pose3d_ready.connect(self._on_pose3d_ready)
-        # Feed completed pose3d files into the Analysis tab so joint angles
-        # appear automatically when the pipeline finishes.
-        self._recon_tab.pose3d_ready.connect(self._analysis_tab.load_pose3d)
-        # Bidirectional frame-cursor sync between the 3D viewer's playback
-        # slider and the analysis plot's vertical cursor.  AnalysisTab guards
-        # against the obvious slider→cursor→slider feedback loop internally
-        # via its _suppress_seek_signal flag.
+        # When pose3d is loaded, push it and the associated video paths to the
+        # Analysis tab so both its 2D preview and its 3D viewer stay in sync
+        # with whatever is loaded in the Reconstruction tab.
+        self._recon_tab.pose3d_ready.connect(self._sync_analysis_tab)
+        # Bidirectional frame-cursor sync: Recon slider ↔ Analysis slider.
+        # AnalysisTab._suppress_seek_signal breaks the feedback loop when
+        # seek_to_frame() drives the internal slider programmatically.
         self._recon_tab._slider.valueChanged.connect(self._analysis_tab.seek_to_frame)
         self._analysis_tab.frame_seek.connect(self._recon_tab._slider.setValue)
+        # Sync play-button state between tabs.  When one tab starts playing
+        # the other tab's button shows Pause too (so the user always knows
+        # playback is active regardless of which tab they are on).  The other
+        # tab's OWN timer is stopped first to prevent double-advancement.
+        self._recon_tab._play_btn.toggled.connect(self._on_recon_play_toggled)
+        self._analysis_tab._play_btn.toggled.connect(self._on_analysis_play_toggled)
         self._capture_tab.recording_saved.connect(self._on_recording_saved)
 
         # Status bar
@@ -164,6 +170,32 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Cross-tab signals
     # ------------------------------------------------------------------
+
+    def _on_recon_play_toggled(self, playing: bool) -> None:
+        """Recon tab started / stopped — mirror to Analysis tab."""
+        if playing:
+            self._analysis_tab._play_timer.stop()   # prevent double-advance
+        self._analysis_tab.sync_play_state(playing)
+
+    def _on_analysis_play_toggled(self, playing: bool) -> None:
+        """Analysis tab started / stopped — mirror to Recon tab."""
+        if playing:
+            self._recon_tab._play_timer.stop()       # prevent double-advance
+        self._recon_tab.sync_play_state(playing)
+
+    def _sync_analysis_tab(self, pose3d_path: str) -> None:
+        """Load pose3d into the Analysis tab and forward the current video paths.
+
+        Called whenever pose3d_ready fires (pipeline end, auto-load on startup,
+        manual file open via the Reconstruction tab's Load button).  The video
+        paths are read directly from the Reconstruction tab's edit fields so
+        the Analysis 2D preview always shows the correct source recordings.
+        """
+        self._analysis_tab.load_pose3d(pose3d_path)
+        self._analysis_tab.set_video_paths(
+            self._recon_tab._left_edit.text().strip(),
+            self._recon_tab._right_edit.text().strip(),
+        )
 
     def _on_calib_saved(self, path: str) -> None:
         self._status.showMessage(f"Calibration saved: {path}")

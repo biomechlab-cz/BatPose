@@ -6,18 +6,26 @@ scripts and unit tests.
 
 from .angles import (
     ANGLE_DEFINITIONS,
+    ANGLE_PAIRS,
     AngleDef,
     AngleStats,
+    ExtendedAngleStats,
+    compute_extended_stats,
     compute_joint_angles,
     compute_stats,
+    compute_symmetry_index,
 )
 from .export import angles_to_csv
 
 __all__ = [
     "ANGLE_DEFINITIONS",
+    "ANGLE_PAIRS",
     "AngleDef",
     "AngleStats",
+    "ExtendedAngleStats",
+    "compute_extended_stats",
     "compute_joint_angles",
     "compute_stats",
+    "compute_symmetry_index",
     "angles_to_csv",
 ]

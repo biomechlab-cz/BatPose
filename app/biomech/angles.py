@@ -216,6 +216,70 @@ class AngleStats:
         )
 
 
+@dataclass(frozen=True)
+class ExtendedAngleStats:
+    """Richer statistics used in the Analysis tab (research-driven, ADR-008).
+
+    Covers: descriptive (SD, CV, median), signal quality (NaN coverage, peak
+    angular velocity), and excursion (total arc = sum |Δθ|).
+    """
+
+    min_deg: float
+    max_deg: float
+    mean_deg: float
+    median_deg: float
+    std_deg: float
+    cv_pct: float          # coefficient of variation (SD / |mean| × 100)
+    rom_deg: float         # range of motion = max − min
+    nan_pct: float         # % of frames with NaN (tracking loss)
+    peak_vel_deg_s: float  # max |dθ/dt| in deg/s
+    excursion_deg: float   # Σ |θ[t+1] − θ[t]| over non-NaN spans
+
+    @property
+    def is_finite(self) -> bool:
+        return all(
+            math.isfinite(v)
+            for v in (
+                self.min_deg, self.max_deg, self.mean_deg, self.median_deg,
+                self.std_deg, self.cv_pct, self.rom_deg, self.nan_pct,
+                self.peak_vel_deg_s, self.excursion_deg,
+            )
+        )
+
+
+#: Paired left/right angle indices for bilateral symmetry analysis.
+#: Each entry is (left_idx, right_idx, display_name) where the indices
+#: reference :data:`ANGLE_DEFINITIONS`.
+ANGLE_PAIRS: list[tuple[int, int, str]] = [
+    (0, 1, "Knee"),
+    (2, 3, "Hip"),
+    (4, 5, "Elbow"),
+    (6, 7, "Shoulder"),
+]
+
+
+def compute_symmetry_index(left_val: float, right_val: float) -> float | None:
+    """Robinson (1987) Symmetry Index.
+
+    SI = 100 × (X_left − X_right) / (0.5 × (|X_left| + |X_right|))
+
+    Returns *None* when the denominator is effectively zero (both values NaN
+    or zero — avoids division by zero on missing data).  Positive values
+    mean left-dominant; negative values mean right-dominant.
+    """
+    if not (math.isfinite(left_val) and math.isfinite(right_val)):
+        return None
+    denom = 0.5 * (abs(left_val) + abs(right_val))
+    if denom < _EPS:
+        return None
+    return 100.0 * (left_val - right_val) / denom
+
+
+# ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
+
+
 def compute_stats(
     angles: np.ndarray, angle_idx: int, person_idx: int
 ) -> AngleStats | None:
@@ -244,4 +308,76 @@ def compute_stats(
         max_deg=mx,
         mean_deg=float(finite.mean()),
         rom_deg=mx - mn,
+    )
+
+
+def compute_extended_stats(
+    angles: np.ndarray,
+    angle_idx: int,
+    person_idx: int,
+    fps: float = 30.0,
+) -> ExtendedAngleStats | None:
+    """Compute all extended statistics for a single angle/person time series.
+
+    Args:
+        angles:     ``[T, P, N_ANGLES]`` float array.
+        angle_idx:  column index into :data:`ANGLE_DEFINITIONS`.
+        person_idx: which person slot to summarise.
+        fps:        frame rate (Hz) — used to compute angular velocity.
+
+    Returns:
+        :class:`ExtendedAngleStats` or ``None`` when *every* frame is NaN.
+    """
+    if angles.ndim != 3:
+        raise ValueError(f"angles must be [T, P, N]; got {angles.shape}")
+    if fps <= 0:
+        raise ValueError(f"fps must be positive; got {fps}")
+
+    series = angles[:, person_idx, angle_idx].astype(np.float64)
+    T = len(series)
+    nan_count = int(np.sum(np.isnan(series)))
+    nan_pct = 100.0 * nan_count / T if T > 0 else 100.0
+
+    finite = series[~np.isnan(series)]
+    if finite.size == 0:
+        return None
+
+    mn = float(finite.min())
+    mx = float(finite.max())
+    mean_v = float(finite.mean())
+    std_v = float(finite.std(ddof=0))
+    median_v = float(np.median(finite))
+    cv_pct = 100.0 * std_v / abs(mean_v) if abs(mean_v) > _EPS else 0.0
+
+    # Angular velocity (deg/s): finite-difference on non-NaN values only.
+    # Use np.gradient with dt=1/fps; mask NaN before differentiating to avoid
+    # spurious large jumps at gap edges.
+    vel_series = np.full_like(series, np.nan)
+    non_nan_idx = np.where(~np.isnan(series))[0]
+    if len(non_nan_idx) >= 2:
+        # Gradient on the non-NaN sub-sequence, then place back.
+        sub = series[non_nan_idx]
+        dt = 1.0 / fps
+        sub_vel = np.gradient(sub, dt)
+        vel_series[non_nan_idx] = sub_vel
+    finite_vel = vel_series[~np.isnan(vel_series)]
+    peak_vel = float(np.max(np.abs(finite_vel))) if finite_vel.size > 0 else 0.0
+
+    # Total angular excursion: Σ |θ[t+1] − θ[t]| skipping NaN gaps.
+    excursion = 0.0
+    for i in range(T - 1):
+        if not np.isnan(series[i]) and not np.isnan(series[i + 1]):
+            excursion += abs(series[i + 1] - series[i])
+
+    return ExtendedAngleStats(
+        min_deg=mn,
+        max_deg=mx,
+        mean_deg=mean_v,
+        median_deg=median_v,
+        std_deg=std_v,
+        cv_pct=cv_pct,
+        rom_deg=mx - mn,
+        nan_pct=nan_pct,
+        peak_vel_deg_s=peak_vel,
+        excursion_deg=excursion,
     )

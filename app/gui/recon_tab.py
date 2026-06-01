@@ -84,6 +84,13 @@ class ReconTab(QWidget):
         self._base_fps: float = 30.0
         self._setup_ui()
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Sync viewer and 2D preview to the current slider position on tab switch."""
+        super().showEvent(event)
+        if self._pose3d_path is not None:
+            self._viewer.show_frame(self._slider.value())
+            self._preview_2d.show_frame(self._slider.value())
+
     def set_project_dir(self, path: str) -> None:
         self._project_dir = path
         # Update default paths
@@ -899,9 +906,12 @@ class ReconTab(QWidget):
         return f"Frame: {frame} / {max(0, total - 1)}   {m:02d}:{s:02d} / {dm:02d}:{ds:02d}"
 
     def _on_slider_changed(self, value: int) -> None:
-        self._viewer.show_frame(value)
-        # Keep the 2D previews in lock-step with the 3D scrubber.
-        self._preview_2d.show_frame(value)
+        # Skip the expensive render when this tab is hidden — the Analysis tab
+        # drives the slider via frame_seek while its own playback is running,
+        # which would otherwise cause a double video-read per tick.
+        if self.isVisible():
+            self._viewer.show_frame(value)
+            self._preview_2d.show_frame(value)
         T = self._viewer.frame_count
         self._frame_label.setText(self._frame_label_text(value, T))
 
@@ -913,6 +923,24 @@ class ReconTab(QWidget):
         else:
             self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPlay))
             self._play_timer.stop()
+
+    def sync_play_state(self, playing: bool) -> None:
+        """Mirror the play/pause state from the other tab.
+
+        Updates the button icon without starting this tab's own timer —
+        only one tab's timer runs at a time.  Stops this timer when
+        *playing* is False so stale timers never survive a tab switch.
+        """
+        if not playing:
+            self._play_timer.stop()
+        _si = QApplication.style().standardIcon
+        SP = QStyle.StandardPixmap
+        self._play_btn.blockSignals(True)
+        self._play_btn.setChecked(playing)
+        self._play_btn.setIcon(
+            _si(SP.SP_MediaPause) if playing else _si(SP.SP_MediaPlay)
+        )
+        self._play_btn.blockSignals(False)
 
     def _on_prev_frame(self) -> None:
         self._slider.setValue(max(0, self._slider.value() - 1))
