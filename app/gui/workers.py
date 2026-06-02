@@ -244,10 +244,31 @@ class CaptureWorker(_BaseWorker):
     Recording to AVI can be toggled at runtime via begin_recording / end_recording.
     When recording stops (or the worker is cancelled while recording), recording_finished
     is emitted with the output file paths.
+
+    Write architecture (async queue)
+    ---------------------------------
+    At high frame rates (≥ 50 fps) synchronous VideoWriter.write() calls block
+    the camera-read thread long enough for the FLIR's NewestOnly buffer to drop
+    frames that arrived during encoding / disk I/O.
+
+    To avoid this, all disk writes are delegated to a dedicated writer thread
+    via a bounded queue.  The camera-read thread only copies the pixel data
+    into the queue (a memcpy, not a codec operation) and continues immediately.
+    The writer thread consumes the queue and performs MJPEG encoding + fsync in
+    its own time.  If the writer cannot keep up, the queue fills and frames are
+    dropped with a logged warning rather than stalling the capture thread.
+
+    Queue sizing: _WRITE_QUEUE_FRAMES holds roughly 1 second of headroom
+    at 50 fps per camera (2 × 50 = 100 frame-objects).  Frames that arrive
+    when the queue is full are counted and reported at stop time.
     """
 
     frame_ready = Signal(object)  # CaptureFrame
     recording_finished = Signal(str, str)  # left_path, right_path
+
+    #: Number of frame-pairs the write queue can buffer.  At 50 fps this is
+    #: ~1 s of headroom for the writer thread to absorb transient I/O spikes.
+    _WRITE_QUEUE_FRAMES = 60
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
@@ -274,27 +295,90 @@ class CaptureWorker(_BaseWorker):
         base = os.path.commonprefix([out_left, out_right]).rstrip("_")
         return f"{base}_timestamps.csv"
 
+    # ------------------------------------------------------------------
+    # Async writer thread
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _writer_thread(
+        q: "queue.Queue[Any]",
+        out_left: str,
+        out_right: str,
+        ts_path: str,
+        frame_h: int,
+        frame_w: int,
+        fps: float,
+        errors: list,
+    ) -> None:
+        """Drain *q* and write frames to disk.
+
+        Each item is a tuple ``(frame_left, frame_right, rec_idx, tl, tr, delta)``
+        where the pixel arrays are already independent copies.
+        A ``None`` sentinel signals the thread to flush and exit.
+
+        VideoWriter and the timestamp file are owned exclusively by this thread
+        (they must not be used from the capture thread).
+        """
+        import cv2 as _cv
+
+        fourcc = _cv.VideoWriter_fourcc(*"MJPG")
+        wl = _cv.VideoWriter(out_left, fourcc, fps, (frame_w, frame_h))
+        wr = _cv.VideoWriter(out_right, fourcc, fps, (frame_w, frame_h))
+        ts_fh = open(ts_path, "w", encoding="utf-8", newline="")
+        ts_fh.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
+
+        try:
+            while True:
+                item = q.get()
+                if item is None:          # sentinel — flush and exit
+                    break
+                fl, fr, rec_idx, tl, tr, delta = item
+                wl.write(fl)
+                wr.write(fr)
+                ts_fh.write(
+                    f"{rec_idx},"
+                    f"{'' if tl is None else tl},"
+                    f"{'' if tr is None else tr},"
+                    f"{'' if delta is None else f'{delta:.3f}'}\n"
+                )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            wl.release()
+            wr.release()
+            ts_fh.close()
+
+    # ------------------------------------------------------------------
+    # Main capture loop
+    # ------------------------------------------------------------------
+
     def _run(self) -> Any:
-        import cv2 as cv
+        import queue
+        import threading
 
         self._source.start()
-        writer_l: Any = None
-        writer_r: Any = None
-        ts_file: Any = None  # sidecar CSV handle, open only while recording
+
         was_recording = False
         frame_idx = 0
-        rec_idx = 0  # frames written to the current recording
+        rec_idx = 0
+        dropped_frames = 0
         preview_stride = max(1, round(self._source.fps / 15))
 
-        def _close_writers() -> None:
-            nonlocal writer_l, writer_r, ts_file
-            if writer_l is not None:
-                writer_l.release()
-            if writer_r is not None:
-                writer_r.release()
-            if ts_file is not None:
-                ts_file.close()
-            writer_l = writer_r = ts_file = None
+        write_q: "queue.Queue[Any] | None" = None
+        write_thread: "threading.Thread | None" = None
+        write_errors: list = []
+
+        def _stop_writer() -> None:
+            """Send sentinel, wait for the writer thread to finish flushing."""
+            nonlocal write_q, write_thread
+            if write_q is not None:
+                write_q.put(None)                     # sentinel
+            if write_thread is not None:
+                write_thread.join(timeout=30.0)       # wait up to 30 s for flush
+                if write_thread.is_alive():
+                    self._progress(0, "WARNING: writer thread did not finish in 30 s")
+            write_q = None
+            write_thread = None
 
         try:
             while not self._cancelled:
@@ -308,49 +392,67 @@ class CaptureWorker(_BaseWorker):
                 # Transition: idle → recording
                 if self._do_record and not was_recording:
                     h, w = frame.frame_left.shape[:2]
-                    fourcc = cv.VideoWriter_fourcc(*"MJPG")
-                    writer_l = cv.VideoWriter(self._out_left, fourcc, self._source.fps, (w, h))
-                    writer_r = cv.VideoWriter(self._out_right, fourcc, self._source.fps, (w, h))
-                    # Per-frame hardware-timestamp log so the pair can be
-                    # sync-verified after the fact.  Columns: the written frame
-                    # index, the left/right camera hardware timestamps (ns, from
-                    # each camera's clock), and their absolute difference (µs).
-                    ts_file = open(
-                        self._timestamps_path(self._out_left, self._out_right),
-                        "w",
-                        encoding="utf-8",
-                        newline="",
-                    )
-                    ts_file.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
+                    ts_path = self._timestamps_path(self._out_left, self._out_right)
+                    write_errors.clear()
+                    dropped_frames = 0
                     rec_idx = 0
+                    write_q = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
+                    write_thread = threading.Thread(
+                        target=self._writer_thread,
+                        args=(
+                            write_q, self._out_left, self._out_right,
+                            ts_path, h, w, self._source.fps, write_errors,
+                        ),
+                        name="capture-writer",
+                        daemon=True,
+                    )
+                    write_thread.start()
                     was_recording = True
 
                 # Transition: recording → idle
                 if not self._do_record and was_recording:
-                    _close_writers()
+                    _stop_writer()
                     was_recording = False
+                    if write_errors:
+                        self._progress(0, f"Write error: {write_errors[0]}")
+                    if dropped_frames:
+                        self._progress(
+                            0,
+                            f"Recording complete — {dropped_frames} frame(s) dropped "
+                            f"(writer could not keep up at {self._source.fps:.0f} fps)",
+                        )
                     self.recording_finished.emit(self._out_left, self._out_right)
 
-                if was_recording:
-                    writer_l.write(frame.frame_left)
-                    writer_r.write(frame.frame_right)
-                    tl = frame.hw_timestamp_left_ns
-                    tr = frame.hw_timestamp_right_ns
-                    delta = frame.hw_delta_us
-                    ts_file.write(
-                        f"{rec_idx},"
-                        f"{'' if tl is None else tl},"
-                        f"{'' if tr is None else tr},"
-                        f"{'' if delta is None else f'{delta:.3f}'}\n"
-                    )
-                    rec_idx += 1
+                if was_recording and write_q is not None:
+                    # cv2.VideoWriter.write() (MJPEG encoding + disk I/O) now runs in
+                    # the writer thread.  The capture thread only does a cheap array
+                    # copy so the pixel data outlives the camera DMA buffer.
+                    try:
+                        write_q.put_nowait((
+                            frame.frame_left.copy(),
+                            frame.frame_right.copy(),
+                            rec_idx,
+                            frame.hw_timestamp_left_ns,
+                            frame.hw_timestamp_right_ns,
+                            frame.hw_delta_us,
+                        ))
+                        rec_idx += 1
+                    except queue.Full:
+                        # Writer is behind — skip this frame rather than stalling
+                        # the camera-read thread (which would trigger a real drop).
+                        dropped_frames += 1
+                        self._progress(
+                            0, f"Frame {frame.frame_index} skipped (write queue full)"
+                        )
 
                 frame_idx += 1
                 self._progress(0, f"Frame {frame.frame_index}  {frame.timestamp:.1f} s")
 
         finally:
             already = was_recording
-            _close_writers()
+            _stop_writer()
+            if write_errors:
+                self._progress(0, f"Write error: {write_errors[0]}")
             if already:
                 self.recording_finished.emit(self._out_left, self._out_right)
             self._source.stop()

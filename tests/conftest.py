@@ -28,10 +28,19 @@ def _suppress_modal_dialogs():
     Tests that specifically need to inspect dialog content should override
     this fixture locally with their own monkeypatch.
     """
+    # Configure WelcomeDialog mock so it does not show a window and does not
+    # trigger any sample-project or new-project action.
+    from unittest.mock import MagicMock
+    mock_dlg = MagicMock()
+    mock_dlg.open_sample = False
+    mock_dlg.new_project = False
+    mock_dlg.exec.return_value = 0
+
     with (
         patch("app.gui.calib_tab.show_worker_error"),
         patch("app.gui.recon_tab.show_worker_error"),
         patch("app.gui.recon_tab.QMessageBox.question", return_value=0x4000),  # Yes
         patch("app.gui.calib_tab.QMessageBox.warning"),
+        patch("app.gui.main_window.WelcomeDialog", return_value=mock_dlg),
     ):
         yield
