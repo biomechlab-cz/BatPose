@@ -117,6 +117,47 @@ class TestAngleComputation:
         assert np.isfinite(out[0, 0, 0])
 
 
+class TestConfidenceThreshold:
+    """min_conf parameter filters keypoints below the threshold."""
+
+    def _knee_pose(self):
+        return _make_pose({
+            11: (1.0, 0.0, 0.0),
+            13: (0.0, 0.0, 0.0),
+            15: (0.0, 1.0, 0.0),
+        })
+
+    def test_default_min_conf_keeps_low_confidence(self):
+        """Default min_conf=0 accepts any non-zero confidence (90° still computed)."""
+        conf = _full_conf()
+        conf[0, 0, 13] = 0.1  # low but non-zero
+        out = compute_joint_angles(self._knee_pose(), conf)
+        assert out[0, 0, 0] == pytest.approx(90.0, abs=1e-3)
+
+    def test_threshold_discards_below_min_conf(self):
+        """A flanking joint below min_conf turns the angle into NaN."""
+        conf = _full_conf()
+        conf[0, 0, 13] = 0.2  # vertex below threshold
+        out = compute_joint_angles(self._knee_pose(), conf, min_conf=0.5)
+        assert np.isnan(out[0, 0, 0])
+
+    def test_threshold_keeps_at_or_above_min_conf(self):
+        """A flanking joint exactly at min_conf is kept (>= comparison)."""
+        conf = _full_conf()
+        conf[0, 0, 13] = 0.5
+        out = compute_joint_angles(self._knee_pose(), conf, min_conf=0.5)
+        assert out[0, 0, 0] == pytest.approx(90.0, abs=1e-3)
+
+    def test_raising_threshold_increases_nan_count(self):
+        """Monotonic: a higher threshold never produces fewer NaNs."""
+        rng = np.random.default_rng(1)
+        pose = rng.standard_normal((20, 1, 17, 3)).astype(np.float32)
+        conf = rng.uniform(0.0, 1.0, (20, 1, 17)).astype(np.float32)
+        nan_low = np.isnan(compute_joint_angles(pose, conf, min_conf=0.1)).sum()
+        nan_high = np.isnan(compute_joint_angles(pose, conf, min_conf=0.8)).sum()
+        assert nan_high >= nan_low
+
+
 # ----------------------------------------------------------------------
 # Shape / dtype contracts
 # ----------------------------------------------------------------------

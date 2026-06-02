@@ -245,30 +245,37 @@ class CaptureWorker(_BaseWorker):
     When recording stops (or the worker is cancelled while recording), recording_finished
     is emitted with the output file paths.
 
-    Write architecture (async queue)
-    ---------------------------------
-    At high frame rates (≥ 50 fps) synchronous VideoWriter.write() calls block
-    the camera-read thread long enough for the FLIR's NewestOnly buffer to drop
-    frames that arrived during encoding / disk I/O.
+    Write architecture (one writer thread PER CAMERA)
+    -------------------------------------------------
+    Synchronous VideoWriter.write() blocks the camera-read thread long enough
+    for the FLIR's NewestOnly buffer to drop frames during encoding / disk I/O.
+    Disk writes are therefore delegated to background writer threads; the read
+    thread only copies the pixel data into a queue and continues.
 
-    To avoid this, all disk writes are delegated to a dedicated writer thread
-    via a bounded queue.  The camera-read thread only copies the pixel data
-    into the queue (a memcpy, not a codec operation) and continues immediately.
-    The writer thread consumes the queue and performs MJPEG encoding + fsync in
-    its own time.  If the writer cannot keep up, the queue fills and frames are
-    dropped with a logged warning rather than stalling the capture thread.
+    Crucially there is **one writer thread per camera**, each with its own
+    queue.  Encoding a single 1920×1200 MJPEG frame takes ~15 ms, so a single
+    thread encoding *both* cameras sequentially tops out near ~32 fps — below a
+    50 fps capture rate.  The queue then fills and frames are dropped, yet the
+    file is still tagged at the nominal fps, which **compresses time and makes
+    the clip play back too fast** (and corrupts downstream velocity/angle
+    timing).  Two parallel writers roughly double throughput (~60+ fps), so the
+    queues stay drained and no frames are dropped.
 
-    Queue sizing: _WRITE_QUEUE_FRAMES holds roughly 1 second of headroom
-    at 50 fps per camera (2 × 50 = 100 frame-objects).  Frames that arrive
-    when the queue is full are counted and reported at stop time.
+    The per-frame timestamp sidecar is written by the capture (producer) thread
+    itself — it is tiny (one CSV line) and keeps the recorded timestamps exactly
+    in step with the frames actually enqueued for writing.
+
+    On stop, the achieved fps is computed from the hardware timestamps and a
+    loud warning is emitted if it falls short of nominal or any frame was
+    dropped, so a time-compressed clip can never pass silently.
     """
 
     frame_ready = Signal(object)  # CaptureFrame
     recording_finished = Signal(str, str)  # left_path, right_path
 
-    #: Number of frame-pairs the write queue can buffer.  At 50 fps this is
-    #: ~1 s of headroom for the writer thread to absorb transient I/O spikes.
-    _WRITE_QUEUE_FRAMES = 60
+    #: Per-camera write-queue depth.  At 50 fps this is ~1.8 s of headroom for a
+    #: writer to absorb transient I/O spikes without dropping frames.
+    _WRITE_QUEUE_FRAMES = 90
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
@@ -296,57 +303,37 @@ class CaptureWorker(_BaseWorker):
         return f"{base}_timestamps.csv"
 
     # ------------------------------------------------------------------
-    # Async writer thread
+    # Per-camera writer thread
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _writer_thread(
+    def _camera_writer(
         q: "queue.Queue[Any]",
-        out_left: str,
-        out_right: str,
-        ts_path: str,
+        out_path: str,
         frame_h: int,
         frame_w: int,
         fps: float,
         errors: list,
     ) -> None:
-        """Drain *q* and write frames to disk.
+        """Drain *q* and write frames for ONE camera to *out_path*.
 
-        Each item is a tuple ``(frame_left, frame_right, rec_idx, tl, tr, delta)``
-        where the pixel arrays are already independent copies.
-        A ``None`` sentinel signals the thread to flush and exit.
-
-        VideoWriter and the timestamp file are owned exclusively by this thread
-        (they must not be used from the capture thread).
+        Each item is an independent numpy frame copy; a ``None`` sentinel
+        signals the thread to flush and exit.  The VideoWriter is owned
+        exclusively by this thread.
         """
         import cv2 as _cv
 
-        fourcc = _cv.VideoWriter_fourcc(*"MJPG")
-        wl = _cv.VideoWriter(out_left, fourcc, fps, (frame_w, frame_h))
-        wr = _cv.VideoWriter(out_right, fourcc, fps, (frame_w, frame_h))
-        ts_fh = open(ts_path, "w", encoding="utf-8", newline="")
-        ts_fh.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
-
+        writer = _cv.VideoWriter(out_path, _cv.VideoWriter_fourcc(*"MJPG"), fps, (frame_w, frame_h))
         try:
             while True:
-                item = q.get()
-                if item is None:          # sentinel — flush and exit
+                frame = q.get()
+                if frame is None:          # sentinel — flush and exit
                     break
-                fl, fr, rec_idx, tl, tr, delta = item
-                wl.write(fl)
-                wr.write(fr)
-                ts_fh.write(
-                    f"{rec_idx},"
-                    f"{'' if tl is None else tl},"
-                    f"{'' if tr is None else tr},"
-                    f"{'' if delta is None else f'{delta:.3f}'}\n"
-                )
+                writer.write(frame)
         except Exception as exc:
             errors.append(exc)
         finally:
-            wl.release()
-            wr.release()
-            ts_fh.close()
+            writer.release()
 
     # ------------------------------------------------------------------
     # Main capture loop
@@ -364,21 +351,88 @@ class CaptureWorker(_BaseWorker):
         dropped_frames = 0
         preview_stride = max(1, round(self._source.fps / 15))
 
-        write_q: "queue.Queue[Any] | None" = None
-        write_thread: "threading.Thread | None" = None
-        write_errors: list = []
+        # Per-camera write state.
+        q_l: "queue.Queue[Any] | None" = None
+        q_r: "queue.Queue[Any] | None" = None
+        thread_l: "threading.Thread | None" = None
+        thread_r: "threading.Thread | None" = None
+        errors_l: list = []
+        errors_r: list = []
+        ts_fh: Any = None  # timestamp sidecar, owned by THIS (producer) thread
+        first_hw_ns: int | None = None
+        last_hw_ns: int | None = None
 
-        def _stop_writer() -> None:
-            """Send sentinel, wait for the writer thread to finish flushing."""
-            nonlocal write_q, write_thread
-            if write_q is not None:
-                write_q.put(None)                     # sentinel
-            if write_thread is not None:
-                write_thread.join(timeout=30.0)       # wait up to 30 s for flush
-                if write_thread.is_alive():
-                    self._progress(0, "WARNING: writer thread did not finish in 30 s")
-            write_q = None
-            write_thread = None
+        def _start_writers(h: int, w: int) -> None:
+            nonlocal q_l, q_r, thread_l, thread_r, ts_fh
+            fps = self._source.fps
+            q_l = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
+            q_r = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
+            errors_l.clear()
+            errors_r.clear()
+            thread_l = threading.Thread(
+                target=self._camera_writer,
+                args=(q_l, self._out_left, h, w, fps, errors_l),
+                name="capture-writer-left",
+                daemon=True,
+            )
+            thread_r = threading.Thread(
+                target=self._camera_writer,
+                args=(q_r, self._out_right, h, w, fps, errors_r),
+                name="capture-writer-right",
+                daemon=True,
+            )
+            thread_l.start()
+            thread_r.start()
+            ts_fh = open(
+                self._timestamps_path(self._out_left, self._out_right),
+                "w",
+                encoding="utf-8",
+                newline="",
+            )
+            ts_fh.write("frame,hw_left_ns,hw_right_ns,abs_delta_us\n")
+
+        def _stop_writers() -> None:
+            nonlocal q_l, q_r, thread_l, thread_r, ts_fh
+            for q in (q_l, q_r):
+                if q is not None:
+                    q.put(None)  # sentinel
+            for th in (thread_l, thread_r):
+                if th is not None:
+                    th.join(timeout=30.0)
+                    if th.is_alive():
+                        self._progress(0, "WARNING: writer thread did not finish in 30 s")
+            if ts_fh is not None:
+                ts_fh.close()
+            q_l = q_r = thread_l = thread_r = ts_fh = None
+
+        def _report_recording_quality() -> None:
+            """Warn loudly if frames were dropped or the achieved fps fell short.
+
+            A clip recorded below its nominal fps (because frames were dropped)
+            is time-compressed: it plays too fast and every derived velocity /
+            joint-angle rate is scaled wrong.  Surface that explicitly.
+            """
+            nominal = float(self._source.fps)
+            achieved = 0.0
+            if (
+                first_hw_ns is not None
+                and last_hw_ns is not None
+                and last_hw_ns > first_hw_ns
+                and rec_idx > 1
+            ):
+                achieved = (rec_idx - 1) / ((last_hw_ns - first_hw_ns) / 1e9)
+            if dropped_frames or (achieved and nominal and achieved < 0.95 * nominal):
+                msg = (
+                    f"⚠ Recording quality: wrote {rec_idx} frames; "
+                    f"{dropped_frames} dropped"
+                )
+                if achieved:
+                    msg += (
+                        f"; achieved ~{achieved:.1f} fps vs {nominal:.0f} fps nominal. "
+                        f"The clip is time-compressed — it will play too fast and "
+                        f"its timing is unreliable for biomechanics."
+                    )
+                self._progress(0, msg)
 
         try:
             while not self._cancelled:
@@ -392,54 +446,51 @@ class CaptureWorker(_BaseWorker):
                 # Transition: idle → recording
                 if self._do_record and not was_recording:
                     h, w = frame.frame_left.shape[:2]
-                    ts_path = self._timestamps_path(self._out_left, self._out_right)
-                    write_errors.clear()
                     dropped_frames = 0
                     rec_idx = 0
-                    write_q = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
-                    write_thread = threading.Thread(
-                        target=self._writer_thread,
-                        args=(
-                            write_q, self._out_left, self._out_right,
-                            ts_path, h, w, self._source.fps, write_errors,
-                        ),
-                        name="capture-writer",
-                        daemon=True,
-                    )
-                    write_thread.start()
+                    first_hw_ns = last_hw_ns = None
+                    _start_writers(h, w)
                     was_recording = True
 
                 # Transition: recording → idle
                 if not self._do_record and was_recording:
-                    _stop_writer()
+                    _stop_writers()
                     was_recording = False
-                    if write_errors:
-                        self._progress(0, f"Write error: {write_errors[0]}")
-                    if dropped_frames:
-                        self._progress(
-                            0,
-                            f"Recording complete — {dropped_frames} frame(s) dropped "
-                            f"(writer could not keep up at {self._source.fps:.0f} fps)",
-                        )
+                    for errs in (errors_l, errors_r):
+                        if errs:
+                            self._progress(0, f"Write error: {errs[0]}")
+                    _report_recording_quality()
                     self.recording_finished.emit(self._out_left, self._out_right)
 
-                if was_recording and write_q is not None:
-                    # cv2.VideoWriter.write() (MJPEG encoding + disk I/O) now runs in
-                    # the writer thread.  The capture thread only does a cheap array
-                    # copy so the pixel data outlives the camera DMA buffer.
-                    try:
-                        write_q.put_nowait((
-                            frame.frame_left.copy(),
-                            frame.frame_right.copy(),
-                            rec_idx,
-                            frame.hw_timestamp_left_ns,
-                            frame.hw_timestamp_right_ns,
-                            frame.hw_delta_us,
-                        ))
+                if was_recording and q_l is not None and q_r is not None:
+                    # Encoding now runs on two parallel writer threads (one per
+                    # camera).  The capture thread only copies pixel data (so it
+                    # outlives the camera DMA buffer) and writes the tiny CSV row.
+                    # Both queues are gated together so left/right frame indices
+                    # stay aligned with the timestamp sidecar.
+                    if (
+                        q_l.qsize() < self._WRITE_QUEUE_FRAMES
+                        and q_r.qsize() < self._WRITE_QUEUE_FRAMES
+                    ):
+                        q_l.put_nowait(frame.frame_left.copy())
+                        q_r.put_nowait(frame.frame_right.copy())
+                        tl = frame.hw_timestamp_left_ns
+                        tr = frame.hw_timestamp_right_ns
+                        delta = frame.hw_delta_us
+                        ts_fh.write(
+                            f"{rec_idx},"
+                            f"{'' if tl is None else tl},"
+                            f"{'' if tr is None else tr},"
+                            f"{'' if delta is None else f'{delta:.3f}'}\n"
+                        )
+                        if tl is not None:
+                            if first_hw_ns is None:
+                                first_hw_ns = tl
+                            last_hw_ns = tl
                         rec_idx += 1
-                    except queue.Full:
-                        # Writer is behind — skip this frame rather than stalling
-                        # the camera-read thread (which would trigger a real drop).
+                    else:
+                        # Both writers fell behind — skip rather than stall the
+                        # camera read (which would drop at the hardware buffer).
                         dropped_frames += 1
                         self._progress(
                             0, f"Frame {frame.frame_index} skipped (write queue full)"
@@ -450,10 +501,12 @@ class CaptureWorker(_BaseWorker):
 
         finally:
             already = was_recording
-            _stop_writer()
-            if write_errors:
-                self._progress(0, f"Write error: {write_errors[0]}")
+            _stop_writers()
+            for errs in (errors_l, errors_r):
+                if errs:
+                    self._progress(0, f"Write error: {errs[0]}")
             if already:
+                _report_recording_quality()
                 self.recording_finished.emit(self._out_left, self._out_right)
             self._source.stop()
 

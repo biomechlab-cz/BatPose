@@ -15,11 +15,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QStyle
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyle
 
 from app.gui.recon_tab import ReconTab
 
-_PROJECT = Path(__file__).parents[2] / "data" / "Test project"
+_PROJECT = Path(__file__).parents[2] / "data" / "Test project" / "test_fixture"
 _CALIB = _PROJECT / "calibration.yml"
 _P2D_L = _PROJECT / "pose2d_left.npz"
 _P2D_R = _PROJECT / "pose2d_right.npz"
@@ -182,3 +182,227 @@ class TestSessionState:
         if not state:
             pytest.skip("ReconTab.session_state not implemented")
         assert state.get("calib") == str(_CALIB)
+
+
+class TestLoadLastRecording:
+    """The 'Load Last Recording' button scans <project>/capture/ for the
+    newest *_left.avi / *_right.avi pair (ADR-007 naming)."""
+
+    def _make_recording(self, capture_dir: Path, stamp: str, mtime: float | None = None) -> tuple[str, str]:
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        left = capture_dir / f"{stamp}_left.avi"
+        right = capture_dir / f"{stamp}_right.avi"
+        left.write_bytes(b"fake-avi")
+        right.write_bytes(b"fake-avi")
+        if mtime is not None:
+            import os
+            os.utime(left, (mtime, mtime))
+            os.utime(right, (mtime, mtime))
+        return str(left), str(right)
+
+    def test_button_disabled_without_project(self, tab):
+        assert not tab._load_last_btn.isEnabled()
+
+    def test_button_disabled_when_no_capture_folder(self, tab, tmp_path):
+        tab.set_project_dir(str(tmp_path))
+        assert not tab._load_last_btn.isEnabled()
+
+    def test_button_enabled_when_recording_present(self, tab, tmp_path):
+        self._make_recording(tmp_path / "capture", "20260101_120000")
+        tab.set_project_dir(str(tmp_path))
+        assert tab._load_last_btn.isEnabled()
+
+    def test_find_returns_newest_pair(self, tab, tmp_path):
+        cap = tmp_path / "capture"
+        self._make_recording(cap, "20260101_120000", mtime=1_000_000)
+        newer_l, newer_r = self._make_recording(cap, "20260102_130000", mtime=2_000_000)
+        tab.set_project_dir(str(tmp_path))
+        found = tab._find_last_recording()
+        assert found == (newer_l, newer_r)
+
+    def test_find_skips_left_without_matching_right(self, tab, tmp_path):
+        cap = tmp_path / "capture"
+        cap.mkdir(parents=True)
+        # Orphan left (newest) with no matching right — must be skipped.
+        orphan = cap / "20260103_140000_left.avi"
+        orphan.write_bytes(b"fake")
+        import os
+        os.utime(orphan, (3_000_000, 3_000_000))
+        good_l, good_r = self._make_recording(cap, "20260101_120000", mtime=1_000_000)
+        tab.set_project_dir(str(tmp_path))
+        found = tab._find_last_recording()
+        assert found == (good_l, good_r)
+
+    def test_load_populates_both_edit_boxes(self, tab, tmp_path):
+        left, right = self._make_recording(tmp_path / "capture", "20260101_120000")
+        tab.set_project_dir(str(tmp_path))
+        tab._on_load_last_recording()
+        assert tab._left_edit.text() == left
+        assert tab._right_edit.text() == right
+
+    def test_find_returns_none_without_project(self, tab):
+        assert tab._find_last_recording() is None
+
+
+class TestOutputNaming:
+    """Output filename tracks the source videos (20260602_121151.npz)."""
+
+    def _make_recording(self, capture_dir: Path, stamp: str) -> tuple[str, str]:
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        left = capture_dir / f"{stamp}_left.avi"
+        right = capture_dir / f"{stamp}_right.avi"
+        left.write_bytes(b"fake")
+        right.write_bytes(b"fake")
+        return str(left), str(right)
+
+    def test_stem_strips_left_right_suffix(self, tab, tmp_path):
+        tab._left_edit.setText(str(tmp_path / "20260602_121151_left.avi"))
+        tab._right_edit.setText(str(tmp_path / "20260602_121151_right.avi"))
+        assert tab._derive_output_stem() == "20260602_121151"
+
+    def test_stem_falls_back_to_pose3d_when_empty(self, tab):
+        assert tab._derive_output_stem() == "pose3d"
+
+    def test_output_named_after_recording_on_load(self, tab, tmp_path):
+        self._make_recording(tmp_path / "capture", "20260602_121151")
+        tab.set_project_dir(str(tmp_path))
+        tab._on_load_last_recording()
+        out = Path(tab._out_edit.text())
+        assert out.name == "20260602_121151.npz"
+        assert out.parent == tmp_path  # anchored in the project folder
+
+    def test_output_defaults_to_pose3d_before_videos(self, tab, tmp_path):
+        # Project set, no videos yet → falls back to <project>/pose3d.npz
+        tab.set_project_dir(str(tmp_path))
+        assert Path(tab._out_edit.text()).name == "pose3d.npz"
+
+    def test_manual_output_edit_not_clobbered(self, tab, tmp_path):
+        self._make_recording(tmp_path / "capture", "20260602_121151")
+        tab.set_project_dir(str(tmp_path))
+        # Simulate a user hand-editing the output field (textEdited signal).
+        tab._out_edit.setText(str(tmp_path / "my_custom_name.npz"))
+        tab._out_edit.textEdited.emit(str(tmp_path / "my_custom_name.npz"))
+        # Loading videos afterwards must NOT overwrite the custom name.
+        tab._on_load_last_recording()
+        assert Path(tab._out_edit.text()).name == "my_custom_name.npz"
+
+    def test_browse_output_disables_auto_naming(self, tab, tmp_path, monkeypatch):
+        self._make_recording(tmp_path / "capture", "20260602_121151")
+        tab.set_project_dir(str(tmp_path))
+        custom = str(tmp_path / "chosen.npz")
+        monkeypatch.setattr(
+            "app.gui.recon_tab.QFileDialog.getSaveFileName",
+            lambda *a, **k: (custom, "NumPy (*.npz)"),
+        )
+        tab._browse_output()
+        assert tab._out_auto is False
+        # A later video load keeps the browsed name.
+        tab._on_load_last_recording()
+        assert Path(tab._out_edit.text()).name == "chosen.npz"
+
+
+class TestSiblingAutoSelect:
+    """Picking one stereo video auto-proposes the matching pair."""
+
+    def _make_pair(self, d: Path, stamp: str) -> tuple[str, str]:
+        d.mkdir(parents=True, exist_ok=True)
+        left = d / f"{stamp}_left.avi"
+        right = d / f"{stamp}_right.avi"
+        left.write_bytes(b"fake")
+        right.write_bytes(b"fake")
+        return str(left), str(right)
+
+    def test_sibling_path_left_to_right(self, tab, tmp_path):
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        assert tab._sibling_video_path(left, "left", "right") == right
+
+    def test_sibling_path_right_to_left(self, tab, tmp_path):
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        assert tab._sibling_video_path(right, "right", "left") == left
+
+    def test_sibling_none_when_missing(self, tab, tmp_path):
+        left = tmp_path / "20260602_113443_left.avi"
+        left.write_bytes(b"fake")  # no matching _right
+        assert tab._sibling_video_path(str(left), "left", "right") is None
+
+    def _patch_prompt(self, monkeypatch, answer):
+        monkeypatch.setattr(
+            "app.gui.recon_tab.QMessageBox.question", lambda *a, **k: answer
+        )
+
+    def test_confirm_fills_empty_right(self, tab, tmp_path, monkeypatch):
+        """Picking left → prompt → Yes → right is filled with the sibling."""
+        self._patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        tab._left_edit.setText(left)
+        tab._auto_select_sibling(tab._left_edit, left)
+        assert tab._right_edit.text() == right
+
+    def test_decline_leaves_right_empty(self, tab, tmp_path, monkeypatch):
+        """Picking left → prompt → No → right stays empty."""
+        self._patch_prompt(monkeypatch, QMessageBox.StandardButton.No)
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        tab._left_edit.setText(left)
+        tab._auto_select_sibling(tab._left_edit, left)
+        assert tab._right_edit.text() == ""
+
+    def test_prompts_to_replace_a_different_right(self, tab, tmp_path, monkeypatch):
+        """When the right field holds a *different* video, the prompt offers to
+        replace it (this is the common case after a session restore)."""
+        prompted = {"shown": False}
+
+        def _spy(*a, **k):
+            prompted["shown"] = True
+            return QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr("app.gui.recon_tab.QMessageBox.question", _spy)
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        tab._right_edit.setText(str(tmp_path / "some_other_clip.avi"))
+        tab._auto_select_sibling(tab._left_edit, left)
+        assert prompted["shown"] is True
+        assert tab._right_edit.text() == right   # replaced after Yes
+
+    def test_replace_declined_keeps_existing_right(self, tab, tmp_path, monkeypatch):
+        """Declining the replace prompt keeps the previously-set right video."""
+        self._patch_prompt(monkeypatch, QMessageBox.StandardButton.No)
+        left, _ = self._make_pair(tmp_path, "20260602_113443")
+        other = str(tmp_path / "some_other_clip.avi")
+        tab._right_edit.setText(other)
+        tab._auto_select_sibling(tab._left_edit, left)
+        assert tab._right_edit.text() == other
+
+    def test_no_prompt_when_right_already_is_sibling(self, tab, tmp_path, monkeypatch):
+        """No dialog when the other field already holds the matching sibling."""
+        prompted = {"shown": False}
+
+        def _spy(*a, **k):
+            prompted["shown"] = True
+            return QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr("app.gui.recon_tab.QMessageBox.question", _spy)
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        tab._right_edit.setText(right)            # already the sibling
+        tab._auto_select_sibling(tab._left_edit, left)
+        assert prompted["shown"] is False
+
+    def test_no_prompt_when_no_sibling_exists(self, tab, tmp_path, monkeypatch):
+        """No dialog when there is no matching sibling file on disk."""
+        prompted = {"shown": False}
+
+        def _spy(*a, **k):
+            prompted["shown"] = True
+            return QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr("app.gui.recon_tab.QMessageBox.question", _spy)
+        left = tmp_path / "20260602_113443_left.avi"
+        left.write_bytes(b"fake")  # no _right sibling
+        tab._auto_select_sibling(tab._left_edit, str(left))
+        assert prompted["shown"] is False
+
+    def test_confirm_fills_empty_left_from_right(self, tab, tmp_path, monkeypatch):
+        """Picking right → prompt → Yes → left is filled (reverse direction)."""
+        self._patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+        left, right = self._make_pair(tmp_path, "20260602_113443")
+        tab._right_edit.setText(right)
+        tab._auto_select_sibling(tab._right_edit, right)
+        assert tab._left_edit.text() == left

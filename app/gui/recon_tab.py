@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -76,20 +76,25 @@ class ReconTab(QWidget):
         # widget is first shown (GL context not yet created).  Processed in
         # showEvent() once the GL context is ready.
         self._pending_pose3d_path: str | None = None
+        # When True, the output filename tracks the source videos automatically
+        # (e.g. 20260602_121151_left.avi → 20260602_121151.npz).  A manual edit
+        # of the output field or an explicit Save-As turns this off so the
+        # user's choice is never clobbered.
+        self._out_auto: bool = True
         self._playing = False
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_timer_tick)
+        # Wall-clock playback: the timer fires at a fixed rate and each tick
+        # advances by however many frames real elapsed time covers (dropping
+        # frames if rendering can't keep up), so playback stays at the correct
+        # real-time speed even when a 50 fps clip can't be rendered frame-by-frame.
+        self._play_timer.setInterval(16)
+        self._play_clock = QElapsedTimer()
+        self._play_frac: float = 0.0
         self._left_meta_cache: dict = {}
         self._right_meta_cache: dict = {}
         self._base_fps: float = 30.0
         self._setup_ui()
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        """Sync viewer and 2D preview to the current slider position on tab switch."""
-        super().showEvent(event)
-        if self._pose3d_path is not None:
-            self._viewer.show_frame(self._slider.value())
-            self._preview_2d.show_frame(self._slider.value())
 
     def set_project_dir(self, path: str) -> None:
         self._project_dir = path
@@ -100,11 +105,10 @@ class ReconTab(QWidget):
             if calib.exists():
                 self._calib_edit.setText(str(calib))
         pose3d = d / "pose3d.npz"
-        current_out = self._out_edit.text().strip()
-        # Set project-folder default whenever output path is empty or still
-        # shows the bare relative placeholder "pose3d.npz".
-        if not current_out or current_out == "pose3d.npz":
-            self._out_edit.setText(str(pose3d))
+        # Default the output path inside the project folder.  When videos are
+        # already known this derives a recording-matched name (<stamp>.npz);
+        # otherwise it falls back to <project>/pose3d.npz until videos load.
+        self._update_default_output()
 
         # Auto-detect pose2d NPZ files so the 2D preview is populated even when
         # no pose3d.npz exists yet (e.g. fresh project where only the 2D
@@ -127,20 +131,31 @@ class ReconTab(QWidget):
             else:
                 self._pending_pose3d_path = str(pose3d)
 
-    def showEvent(self, event) -> None:
-        """Process any deferred pose3d load the first time the tab is shown.
+        # Refresh the Load-Last-Recording button now that the project (and its
+        # capture folder) is known.
+        self._refresh_last_recording_btn()
 
-        set_project_dir() is called during session restore, before the main
-        window is shown, so the GL context does not yet exist.  Rather than
-        calling _load_pose3d() immediately (which would try to add GL items
-        before makeCurrent() succeeds), we stash the path and process it here
-        via a zero-timeout singleShot so we run after the first paintGL().
+    def showEvent(self, event) -> None:
+        """Tab-shown housekeeping.
+
+        1. Process any pose3d load deferred from set_project_dir() (which runs
+           during session restore, before the GL context exists — calling
+           _load_pose3d() then would add GL items before makeCurrent() succeeds).
+           We stash the path and process it here via a zero-timeout singleShot
+           so we run after the first paintGL().
+        2. Re-scan for the latest recording (one may have been made in the
+           Capture tab since this tab was last shown).
+        3. Sync the 3D viewer and 2D preview to the current slider position.
         """
         super().showEvent(event)
         if self._pending_pose3d_path is not None:
             path = self._pending_pose3d_path
             self._pending_pose3d_path = None
             QTimer.singleShot(0, lambda: self._try_auto_load_pose3d(path))
+        self._refresh_last_recording_btn()
+        if self._pose3d_path is not None:
+            self._viewer.show_frame(self._slider.value())
+            self._preview_2d.show_frame(self._slider.value())
 
     def set_calibration(self, calib_path: str) -> None:
         """Auto-fill calibration path (called from calibration tab signal)."""
@@ -213,6 +228,18 @@ class ReconTab(QWidget):
         row_r.addWidget(self._right_status)
         vform.addRow("Right video:", row_r)
         vform.addRow("", self._right_meta_lbl)
+
+        # Quick-load the most recent recording from the project's capture
+        # folder.  Disabled (with an explanatory tooltip) until a recording
+        # pair is actually present.
+        self._load_last_btn = QPushButton("Load Last Recording")
+        self._load_last_btn.setToolTip(
+            "Load the most recent left/right recording from the project's "
+            "capture folder."
+        )
+        self._load_last_btn.clicked.connect(self._on_load_last_recording)
+        self._load_last_btn.setEnabled(False)
+        vform.addRow("", self._load_last_btn)
         ctrl_layout.addWidget(vid_group)
 
         # Calibration
@@ -296,7 +323,11 @@ class ReconTab(QWidget):
         out_inner = QHBoxLayout(out_group)
         out_inner.setContentsMargins(6, 4, 6, 4)
         self._out_edit = QLineEdit()
-        self._out_edit.setPlaceholderText("pose3d.npz (set when project is loaded)")
+        self._out_edit.setPlaceholderText("auto: <recording>.npz (set when videos are loaded)")
+        # textEdited fires only on USER keystrokes (not programmatic setText),
+        # so a hand-typed output path disables auto-naming without the
+        # auto-update calls (which use setText) re-enabling it.
+        self._out_edit.textEdited.connect(lambda _t: setattr(self, "_out_auto", False))
         btn_out = QPushButton("…")
         btn_out.setFixedWidth(30)
         btn_out.clicked.connect(self._browse_output)
@@ -458,6 +489,10 @@ class ReconTab(QWidget):
         self._calib_status.setText("✓" if calib_ok else "✗")
         self._calib_status.setStyleSheet("color: green;" if calib_ok else "color: red;")
 
+        # Keep the output filename in sync with the source videos (no-op when
+        # the user has taken manual control of the output field).
+        self._update_default_output()
+
         all_ok = left_ok and right_ok and calib_ok
         self._run_btn.setEnabled(all_ok)
         if all_ok:
@@ -508,23 +543,139 @@ class ReconTab(QWidget):
         )
         if path:
             edit.setText(path)
-            meta = _video_meta(path)
-            meta_text = ""
+            self._apply_video_meta(edit, path)
+            self._auto_select_sibling(edit, path)
+
+    @staticmethod
+    def _sibling_video_path(path: str, from_side: str, to_side: str) -> str | None:
+        """Return the matching stereo-pair video, or None.
+
+        Replaces the first ``_<from_side>`` token in the filename with
+        ``_<to_side>`` (e.g. ``…_left.avi`` → ``…_right.avi``) and returns the
+        path only if that sibling actually exists on disk.  Case-insensitive on
+        the side token so ``_LEFT``/``_Left`` work too.
+        """
+        p = Path(path)
+        name = p.name
+        lower = name.lower()
+        token = f"_{from_side}"
+        idx = lower.find(token)
+        if idx == -1:
+            return None
+        sib_name = name[:idx] + f"_{to_side}" + name[idx + len(token):]
+        sib = p.with_name(sib_name)
+        return str(sib) if sib.is_file() else None
+
+    def _auto_select_sibling(self, edit: QLineEdit, path: str) -> None:
+        """After a video is picked, offer to set the matching stereo-pair video.
+
+        Picking the left video proposes the matching ``*_right*`` (and vice
+        versa) via a Yes/No confirmation dialog.  The prompt also appears when
+        the other field already holds a *different* video (offering to replace
+        it for the matching pair) — only skipped when it is already the
+        sibling.  The user can always decline, so nothing is changed silently.
+        """
+        if edit is self._left_edit:
+            other, to_side = self._right_edit, "right"
+            from_side = "left"
+        else:
+            other, to_side = self._left_edit, "left"
+            from_side = "right"
+        sib = self._sibling_video_path(path, from_side, to_side)
+        if not sib:
+            return
+        current = other.text().strip()
+        if current == sib:
+            return  # the other side is already the matching sibling
+        verb = "Replace the current" if current else "Set the"
+        reply = QMessageBox.question(
+            self,
+            "Matching video found",
+            f"A matching {to_side} video was found next to your selection.\n\n"
+            f"{verb} {to_side} video with:\n{Path(sib).name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            other.setText(sib)
+            self._apply_video_meta(other, sib)
+            self._log_msg(f"Set {to_side} video: {Path(sib).name}")
+
+    def _apply_video_meta(self, edit: QLineEdit, path: str) -> None:
+        """Probe *path* and update the meta label/cache for the matching side.
+
+        Shared by Browse… and Load Last Recording so both paths populate the
+        resolution / fps / duration label and the meta cache identically.
+        """
+        meta = _video_meta(path)
+        meta_text = ""
+        if meta:
+            meta_text = (
+                f"{meta['width']}×{meta['height']}  "
+                f"{meta['fps']:.1f} fps  {meta['duration_s']:.1f} s"
+            )
+        if edit is self._left_edit:
+            self._left_meta_cache = meta
+            self._left_meta_lbl.setStyleSheet("color: #888; font-size: 10px;")
+            self._left_meta_lbl.setText(meta_text)
             if meta:
-                meta_text = (
-                    f"{meta['width']}×{meta['height']}  "
-                    f"{meta['fps']:.1f} fps  {meta['duration_s']:.1f} s"
-                )
-            if edit is self._left_edit:
-                self._left_meta_cache = meta
-                self._left_meta_lbl.setStyleSheet("color: #888; font-size: 10px;")
-                self._left_meta_lbl.setText(meta_text)
-                if meta:
-                    self._base_fps = meta["fps"]
-            else:
-                self._right_meta_cache = meta
-                self._right_meta_lbl.setStyleSheet("color: #888; font-size: 10px;")
-                self._right_meta_lbl.setText(meta_text)
+                self._base_fps = meta["fps"]
+        else:
+            self._right_meta_cache = meta
+            self._right_meta_lbl.setStyleSheet("color: #888; font-size: 10px;")
+            self._right_meta_lbl.setText(meta_text)
+
+    def _find_last_recording(self) -> tuple[str, str] | None:
+        """Return (left, right) paths of the most recent recording pair, or None.
+
+        Recordings are written to ``<project>/capture/`` with start-time-stamped
+        names ``YYYYMMDD_HHMMSS_{left,right}.avi`` (see ADR-007).  We scan for
+        ``*_left.avi`` files, newest first by modification time, and return the
+        first one that has a matching ``*_right.avi`` sibling.
+        """
+        if not self._project_dir:
+            return None
+        capture_dir = Path(self._project_dir) / "capture"
+        if not capture_dir.is_dir():
+            return None
+        left_videos = sorted(
+            capture_dir.glob("*_left.avi"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for left in left_videos:
+            right = left.with_name(left.name[: -len("_left.avi")] + "_right.avi")
+            if right.is_file():
+                return str(left), str(right)
+        return None
+
+    def _refresh_last_recording_btn(self) -> None:
+        """Enable the Load-Last button only when a recording pair is available."""
+        pair = self._find_last_recording()
+        self._load_last_btn.setEnabled(pair is not None)
+        if pair is None:
+            self._load_last_btn.setToolTip(
+                "No recordings found in the project's capture folder yet."
+            )
+        else:
+            self._load_last_btn.setToolTip(
+                f"Load the most recent recording:\n{Path(pair[0]).name} / "
+                f"{Path(pair[1]).name}"
+            )
+
+    def _on_load_last_recording(self) -> None:
+        pair = self._find_last_recording()
+        if pair is None:
+            self._log_msg("No recordings found in the project's capture folder.")
+            return
+        left, right = pair
+        self._left_edit.setText(left)
+        self._apply_video_meta(self._left_edit, left)
+        self._right_edit.setText(right)
+        self._apply_video_meta(self._right_edit, right)
+        self._log_msg(
+            f"Loaded last recording: {Path(left).name} / {Path(right).name}"
+        )
 
     def _browse_calib(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select Calibration", "", "YAML (*.yml *.yaml)")
@@ -537,6 +688,49 @@ class ReconTab(QWidget):
         )
         if path:
             self._out_edit.setText(path)
+            self._out_auto = False  # explicit choice — stop auto-naming
+
+    def _derive_output_stem(self) -> str:
+        """Derive the output file stem from the source video names.
+
+        For conventionally-named recordings (``YYYYMMDD_HHMMSS_left.avi`` /
+        ``…_right.avi``) the common prefix gives the start-time stamp, so the
+        output becomes ``YYYYMMDD_HHMMSS.npz``.  For arbitrary user videos it
+        falls back to the common prefix of the two stems, then the left stem,
+        then the generic ``pose3d``.
+        """
+        import os
+
+        left = self._left_edit.text().strip()
+        right = self._right_edit.text().strip()
+        if left and right:
+            common = os.path.commonprefix(
+                [Path(left).stem, Path(right).stem]
+            ).rstrip("_- ")
+            if common:
+                return common
+        if left:
+            return Path(left).stem
+        return "pose3d"
+
+    def _update_default_output(self) -> None:
+        """Refresh the output path to match the source videos, if auto-naming is on.
+
+        Anchored to the project folder when one is set, otherwise to the left
+        video's directory.  Does nothing when the user has taken manual control
+        of the output field (``_out_auto`` is False) or when there is no
+        directory to anchor the path to yet.
+        """
+        if not self._out_auto:
+            return
+        left = self._left_edit.text().strip()
+        if self._project_dir:
+            out_dir = Path(self._project_dir)
+        elif left:
+            out_dir = Path(left).parent
+        else:
+            return  # nothing to anchor a path to yet — leave placeholder
+        self._out_edit.setText(str(out_dir / f"{self._derive_output_stem()}.npz"))
 
     # ------------------------------------------------------------------
     # Pipeline control
@@ -906,11 +1100,13 @@ class ReconTab(QWidget):
         return f"Frame: {frame} / {max(0, total - 1)}   {m:02d}:{s:02d} / {dm:02d}:{ds:02d}"
 
     def _on_slider_changed(self, value: int) -> None:
-        # Skip the expensive render when this tab is hidden — the Analysis tab
-        # drives the slider via frame_seek while its own playback is running,
-        # which would otherwise cause a double video-read per tick.
+        # Skip rendering entirely when this tab is hidden — the Analysis tab
+        # drives the slider via frame_seek while its own playback runs.
         if self.isVisible():
-            self._viewer.show_frame(value)
+            self._viewer.show_frame(value)   # cheap GL update — every frame
+            # Non-blocking: the preview decodes on a background thread and
+            # coalesces to the latest requested frame, so driving it every
+            # frame during playback does not stall the 3D view.
             self._preview_2d.show_frame(value)
         T = self._viewer.frame_count
         self._frame_label.setText(self._frame_label_text(value, T))
@@ -919,6 +1115,8 @@ class ReconTab(QWidget):
         _si = QApplication.style().standardIcon
         if checked:
             self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPause))
+            self._play_frac = 0.0
+            self._play_clock.start()          # anchor the wall clock
             self._play_timer.start()
         else:
             self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPlay))
@@ -957,21 +1155,47 @@ class ReconTab(QWidget):
         self._slider.setValue(min(self._slider.maximum(), self._slider.value() + step))
 
     def _on_speed_changed(self, _idx: int) -> None:
-        """Update the play-timer interval when speed combo changes."""
-        speeds = [0.25, 0.5, 1.0, 2.0]
-        speed = speeds[self._speed_combo.currentIndex()]
-        fps = self._base_fps if self._base_fps > 0 else 30.0
-        interval_ms = max(1, int(1000.0 / (fps * speed)))
-        self._play_timer.setInterval(interval_ms)
+        """Re-anchor the wall clock so a mid-playback speed change is seamless.
+
+        The timer interval is fixed; playback speed is applied per-tick from
+        elapsed wall-clock time, so changing speed only needs the fractional
+        accumulator reset from the current position.
+        """
+        self._play_frac = 0.0
+        if self._play_timer.isActive():
+            self._play_clock.restart()
 
     def _on_timer_tick(self) -> None:
-        T = self._viewer.frame_count
-        if T == 0:
+        if self._viewer.frame_count == 0:
             self._play_timer.stop()
             self._play_btn.setChecked(False)
             return
-        next_frame = (self._slider.value() + 1) % T
-        self._slider.setValue(next_frame)
+        self._advance_by_elapsed(self._play_clock.restart())
+
+    def _advance_by_elapsed(self, elapsed_ms: float) -> None:
+        """Advance the slider by the whole frames *elapsed_ms* of real time covers.
+
+        Pure of any wall-clock reading (the caller supplies elapsed_ms) so it is
+        deterministic and unit-testable.  Frames are dropped when a tick runs
+        long, keeping playback at true real-time speed instead of slowing down.
+        """
+        T = self._viewer.frame_count
+        if T == 0:
+            return
+        speeds = [0.25, 0.5, 1.0, 2.0]
+        speed = speeds[self._speed_combo.currentIndex()]
+        fps = self._base_fps if self._base_fps > 0 else 30.0
+        self._play_frac += elapsed_ms / 1000.0 * fps * speed
+        step = int(self._play_frac)
+        if step <= 0:
+            return
+        self._play_frac -= step
+        # Cap the jump so a transient render lag doesn't trigger a catch-up
+        # surge; drop the backlog instead of sprinting through frames.
+        if step > 4:
+            step = 4
+            self._play_frac = 0.0
+        self._slider.setValue((self._slider.value() + step) % T)
 
     def _log_msg(self, msg: str) -> None:
         self._log.append(msg)

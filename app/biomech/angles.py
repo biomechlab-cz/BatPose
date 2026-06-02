@@ -96,7 +96,7 @@ def _three_point_angle(
 
 
 def _trunk_inclination(
-    joints: np.ndarray, conf: np.ndarray
+    joints: np.ndarray, present: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Angle of the trunk segment against the vertical Z-up axis.
 
@@ -104,14 +104,15 @@ def _trunk_inclination(
     person yields ~0°, a person lying flat yields ~90°.
 
     Args:
-        joints: ``[T, P, 17, 3]`` float array in the Z-up world frame.
-        conf:   ``[T, P, 17]`` confidence array.
+        joints:  ``[T, P, 17, 3]`` float array in the Z-up world frame.
+        present: ``[T, P, 17]`` bool — True where a joint is considered
+                 detected (confidence ≥ the caller's threshold).
 
     Returns:
         Tuple ``(angle_deg, valid_mask)``:
             angle_deg  — ``[T, P]`` float angles in degrees
-            valid_mask — ``[T, P]`` bool, True where conf>0 on both hips
-                         (11, 12) AND both shoulders (5, 6)
+            valid_mask — ``[T, P]`` bool, True where both hips (11, 12) AND
+                         both shoulders (5, 6) are present
     """
     # Mid-points along the lateral axis — both averaged in the [T, P, 3] frame.
     mid_hip = 0.5 * (joints[..., 11, :] + joints[..., 12, :])
@@ -124,16 +125,16 @@ def _trunk_inclination(
     angle = np.degrees(np.arccos(cos_a))
 
     valid = (
-        (conf[..., 5] > 0)
-        & (conf[..., 6] > 0)
-        & (conf[..., 11] > 0)
-        & (conf[..., 12] > 0)
+        present[..., 5]
+        & present[..., 6]
+        & present[..., 11]
+        & present[..., 12]
     )
     return angle.astype(np.float32), valid
 
 
 def compute_joint_angles(
-    joints3d: np.ndarray, conf3d: np.ndarray
+    joints3d: np.ndarray, conf3d: np.ndarray, min_conf: float = 0.0
 ) -> np.ndarray:
     """Compute all angles in :data:`ANGLE_DEFINITIONS` for every frame/person.
 
@@ -143,11 +144,16 @@ def compute_joint_angles(
                    OpenCV→Z-up swap before calling this function if the data
                    came directly from a `pose3d.npz` file.
         conf3d:   ``[T, P, 17]`` float — per-joint confidence ∈ [0, 1].
+        min_conf: confidence threshold.  A joint counts as detected only when
+                  ``conf3d > 0`` **and** ``conf3d >= min_conf``.  The default
+                  of 0.0 reproduces the original behaviour (any non-zero
+                  confidence counts).  The Analysis tab raises this to let the
+                  user discard low-confidence keypoints interactively.
 
     Returns:
         ``[T, P, len(ANGLE_DEFINITIONS)]`` float32 array of degrees.
         Entries are ``np.nan`` for frames in which any flanking joint of the
-        corresponding angle has ``conf3d == 0``.
+        corresponding angle is below the confidence threshold.
     """
     joints3d = np.asarray(joints3d, dtype=np.float32)
     conf3d = np.asarray(conf3d, dtype=np.float32)
@@ -165,10 +171,14 @@ def compute_joint_angles(
     N = len(ANGLE_DEFINITIONS)
     out = np.full((T, P, N), np.nan, dtype=np.float32)
 
+    # A joint is "present" when it was detected (conf > 0) AND clears the
+    # requested threshold.  At min_conf=0 this is just conf > 0.
+    present = (conf3d > 0.0) & (conf3d >= min_conf)
+
     for k, adef in enumerate(ANGLE_DEFINITIONS):
         if adef.indices is None:
             # Trunk inclination — special case handled separately.
-            angle, valid = _trunk_inclination(joints3d, conf3d)
+            angle, valid = _trunk_inclination(joints3d, present)
             out[..., k] = np.where(valid, angle, np.nan)
             continue
 
@@ -183,11 +193,7 @@ def compute_joint_angles(
             joints3d[..., b_idx, :],
             joints3d[..., c_idx, :],
         )
-        valid = (
-            (conf3d[..., a_idx] > 0)
-            & (conf3d[..., b_idx] > 0)
-            & (conf3d[..., c_idx] > 0)
-        )
+        valid = present[..., a_idx] & present[..., b_idx] & present[..., c_idx]
         out[..., k] = np.where(valid, angle, np.nan).astype(np.float32)
 
     return out

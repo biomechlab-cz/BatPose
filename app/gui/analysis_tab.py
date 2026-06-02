@@ -35,11 +35,12 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -86,6 +87,10 @@ _CURVE_COLORS: list[tuple[int, int, int]] = [
 ]
 
 _PLAYBACK_SPEEDS = [0.25, 0.5, 1.0, 2.0]
+
+# Max frames a single playback tick may advance — caps catch-up surges after a
+# transient render lag (e.g. GL warm-up) so playback never visibly sprints.
+_MAX_PLAY_STEP = 4
 
 _TABLE_STYLE = (
     "QTableWidget { font-size: 10px; }"
@@ -247,6 +252,13 @@ class AnalysisTab(QWidget):
         # Playback ────────────────────────────────────────────────────────────
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_timer_tick)
+        # Wall-clock playback: fixed timer rate, each tick advances by the
+        # number of frames real elapsed time covers (frames dropped when a
+        # tick runs long), so a 50 fps clip plays at true speed instead of
+        # slowing to the render rate.
+        self._play_timer.setInterval(16)
+        self._play_clock = QElapsedTimer()
+        self._play_frac: float = 0.0
         self._suppress_seek_signal: bool = False
 
         # Auto-evaluate: fires 150 ms after the ROI region stops changing.
@@ -286,7 +298,9 @@ class AnalysisTab(QWidget):
         self._joints_zup = _opencv_to_zup(joints_cv)
         self._conf3d = conf3d
         self._n_frames, self._n_persons = self._joints_zup.shape[:2]
-        self._angles = compute_joint_angles(self._joints_zup, conf3d)
+        self._angles = compute_joint_angles(
+            self._joints_zup, conf3d, min_conf=self._conf_spin.value()
+        )
 
         # Person combo
         self._person_combo.blockSignals(True)
@@ -392,6 +406,27 @@ class AnalysisTab(QWidget):
         self._person_combo.currentIndexChanged.connect(self._on_person_changed)
         p_row.addWidget(self._person_combo, 1)
         outer.addLayout(p_row)
+
+        # ── Confidence threshold ──────────────────────────────────────
+        # Keypoints below this confidence are treated as not-detected, so any
+        # angle that relies on one becomes NaN (a gap in the plot).  Lets the
+        # user trade coverage for reliability without re-running the pipeline.
+        conf_row = QHBoxLayout()
+        conf_row.addWidget(QLabel("Min confidence:"))
+        self._conf_spin = QDoubleSpinBox()
+        self._conf_spin.setRange(0.0, 1.0)
+        self._conf_spin.setSingleStep(0.05)
+        self._conf_spin.setDecimals(2)
+        self._conf_spin.setValue(0.0)
+        self._conf_spin.setToolTip(
+            "Discard keypoints with stored confidence below this value.\n"
+            "Angles using a discarded joint become NaN (a gap in the curve)\n"
+            "and are excluded from the statistics. 0.00 keeps every detected\n"
+            "keypoint."
+        )
+        self._conf_spin.valueChanged.connect(self._on_conf_threshold_changed)
+        conf_row.addWidget(self._conf_spin, 1)
+        outer.addLayout(conf_row)
 
         # ── Statistics tabs (stretch=1 so they fill available height) ─
         self._stats_tabs = QTabWidget()
@@ -686,14 +721,14 @@ class AnalysisTab(QWidget):
 
     def _on_slider_changed(self, value: int) -> None:
         frame = value
-        # Only render the 3D viewer and 2D preview when this tab is actually
-        # visible.  When the Reconstruction tab is playing, its timer fires →
-        # Recon slider changes → seek_to_frame() here → slider.setValue() →
-        # this handler runs.  Without the guard, both tabs render a video
-        # frame from disk on every tick, halving playback smoothness.
-        # showEvent() catches up the render the moment the tab is switched to.
+        # Render only when this tab is visible (the Reconstruction slider drives
+        # this one via seek_to_frame while it plays; the guard stops both tabs
+        # decoding video per tick).  showEvent() catches up on tab switch.
         if self.isVisible():
-            self._viewer.show_frame(frame)
+            self._viewer.show_frame(frame)   # cheap GL update — every frame
+            # Non-blocking: the preview decodes on a background thread and
+            # coalesces to the latest requested frame, so driving it every
+            # frame during playback does not stall the 3D view.
             self._preview_2d.show_frame(frame)
         if self._fps > 0:
             self._cursor.setValue(frame / self._fps)
@@ -714,6 +749,8 @@ class AnalysisTab(QWidget):
         SP = QStyle.StandardPixmap
         if checked:
             self._play_btn.setIcon(_si(SP.SP_MediaPause))
+            self._play_frac = 0.0
+            self._play_clock.start()          # anchor the wall clock
             self._play_timer.start()
         else:
             self._play_btn.setIcon(_si(SP.SP_MediaPlay))
@@ -742,7 +779,32 @@ class AnalysisTab(QWidget):
             self._play_timer.stop()
             self._play_btn.setChecked(False)
             return
-        self._slider.setValue((self._slider.value() + 1) % self._n_frames)
+        self._advance_by_elapsed(self._play_clock.restart())
+
+    def _advance_by_elapsed(self, elapsed_ms: float) -> None:
+        """Advance the slider by the whole frames *elapsed_ms* of real time covers.
+
+        Pure of any wall-clock reading (the caller supplies elapsed_ms), so it
+        is deterministic and unit-testable.  Fractional frames accumulate in
+        ``_play_frac``; when a tick runs long the larger elapsed value advances
+        multiple frames, dropping the intermediate ones to hold real-time speed.
+        """
+        if self._n_frames == 0:
+            return
+        speed = _PLAYBACK_SPEEDS[self._speed_combo.currentIndex()]
+        fps = self._fps if self._fps > 0 else 30.0
+        self._play_frac += elapsed_ms / 1000.0 * fps * speed
+        step = int(self._play_frac)
+        if step <= 0:
+            return
+        self._play_frac -= step
+        # Cap the jump so a transient lag (e.g. GL warm-up on the first frames)
+        # doesn't trigger a visible catch-up surge; drop the backlog instead of
+        # sprinting through frames.
+        if step > _MAX_PLAY_STEP:
+            step = _MAX_PLAY_STEP
+            self._play_frac = 0.0
+        self._slider.setValue((self._slider.value() + step) % self._n_frames)
 
     def _on_prev_frame(self) -> None:
         self._slider.setValue(max(0, self._slider.value() - 1))
@@ -759,9 +821,15 @@ class AnalysisTab(QWidget):
         self._slider.setValue(min(self._slider.maximum(), self._slider.value() + step))
 
     def _on_speed_changed(self, _idx: int = 0) -> None:
-        speed = _PLAYBACK_SPEEDS[self._speed_combo.currentIndex()]
-        fps = self._fps if self._fps > 0 else 30.0
-        self._play_timer.setInterval(max(1, int(1000.0 / (fps * speed))))
+        """Re-anchor the wall clock so a mid-playback speed change is seamless.
+
+        The timer interval is fixed; speed is applied per-tick from elapsed
+        wall-clock time, so changing speed only resets the fractional
+        accumulator from the current position.
+        """
+        self._play_frac = 0.0
+        if self._play_timer.isActive():
+            self._play_clock.restart()
 
     def _frame_label_text(self, frame: int) -> str:
         fps = self._fps if self._fps > 0 else 30.0
@@ -784,6 +852,22 @@ class AnalysisTab(QWidget):
         self._refresh_full_stats()
         self._refresh_asymmetry_tab()
         self._clear_segment_stats()
+
+    def _on_conf_threshold_changed(self, _value: float) -> None:
+        """Recompute angles at the new confidence threshold and refresh all views."""
+        if self._joints_zup is None or self._conf3d is None:
+            return
+        self._angles = compute_joint_angles(
+            self._joints_zup, self._conf3d, min_conf=self._conf_spin.value()
+        )
+        self._redraw_curves()
+        self._refresh_full_stats()
+        self._refresh_asymmetry_tab()
+        # Re-evaluate the active segment so its stats reflect the new threshold.
+        if self._roi_region.isVisible():
+            self._on_evaluate_segment()
+        else:
+            self._clear_segment_stats()
 
     # =========================================================================
     # ROI / segment slots

@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import yaml
 
-_CALIB_PATH = Path(__file__).parents[2] / "data" / "Test project" / "calibration.yml"
+_CALIB_PATH = Path(__file__).parents[2] / "data" / "Test project" / "test_fixture" / "calibration.yml"
 pytestmark = pytest.mark.skipif(
     not _CALIB_PATH.exists(), reason="calibration.yml fixture not found"
 )

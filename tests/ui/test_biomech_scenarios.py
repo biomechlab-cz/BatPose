@@ -694,15 +694,44 @@ class TestScenario7PlaybackControls:
         icon_play = tab._play_btn.icon().cacheKey()
         assert icon_idle != icon_play
 
-    def test_timer_tick_advances_frame(self, tab):
+    def test_one_frame_of_elapsed_advances_one_frame(self, tab):
+        """At 1× speed, one frame-period of elapsed time advances exactly one frame."""
         tab._slider.setValue(10)
-        tab._on_timer_tick()
+        tab._advance_by_elapsed(1000.0 / FPS)   # exactly one frame period
         assert tab._slider.value() == 11
 
-    def test_timer_tick_wraps_at_end(self, tab):
-        tab._slider.setValue(89)
-        tab._on_timer_tick()
+    def test_moderate_long_tick_drops_frames_to_stay_realtime(self, tab):
+        """A tick covering 3 frame-periods advances 3 frames (frame-dropping)."""
+        tab._slider.setValue(10)
+        tab._advance_by_elapsed(3 * 1000.0 / FPS)
+        assert tab._slider.value() == 13
+
+    def test_huge_tick_is_capped(self, tab):
+        """A very long tick is capped (no catch-up surge)."""
+        from app.gui.analysis_tab import _MAX_PLAY_STEP
+
+        tab._slider.setValue(10)
+        tab._advance_by_elapsed(20 * 1000.0 / FPS)   # 20 frames' worth
+        assert tab._slider.value() == 10 + _MAX_PLAY_STEP
+
+    def test_sub_frame_elapsed_does_not_advance(self, tab):
+        """Less than one frame-period of elapsed time holds the current frame."""
+        tab._slider.setValue(10)
+        tab._advance_by_elapsed(1000.0 / FPS * 0.4)   # 0.4 of a frame
+        assert tab._slider.value() == 10
+
+    def test_advance_wraps_at_end(self, tab):
+        tab._slider.setValue(tab._n_frames - 1)
+        tab._advance_by_elapsed(1000.0 / FPS)
         assert tab._slider.value() == 0
+
+    def test_fractional_frames_accumulate(self, tab):
+        """Two 0.6-frame ticks accumulate to advance one frame total."""
+        tab._slider.setValue(10)
+        tab._advance_by_elapsed(1000.0 / FPS * 0.6)   # 0.6 → 0 frames, 0.6 stored
+        assert tab._slider.value() == 10
+        tab._advance_by_elapsed(1000.0 / FPS * 0.6)   # +0.6 → 1.2 → 1 frame
+        assert tab._slider.value() == 11
 
     def test_frame_label_shows_current_frame(self, tab):
         tab._slider.setValue(30)
@@ -727,6 +756,27 @@ class TestScenario7PlaybackControls:
         tab.frame_seek.connect(lambda f: emitted.append(f))
         tab._slider.setValue(15)
         assert 15 in emitted
+
+    def test_2d_preview_driven_during_playback(self, tab):
+        """The 2D preview is requested every frame during playback.
+
+        show_frame() is non-blocking (the preview decodes on a background
+        thread and coalesces to the latest frame), so driving it during
+        playback is safe and keeps the camera overlays visible.
+        """
+        calls: list[int] = []
+        tab._preview_2d.show_frame = lambda f: calls.append(f)  # spy
+        tab._play_btn.setChecked(True)        # start playing
+        tab._slider.setValue(20)              # frame change during playback
+        assert 20 in calls, "2D preview not driven during playback"
+        tab._play_btn.setChecked(False)
+
+    def test_2d_preview_updates_on_manual_scrub(self, tab):
+        """Scrubbing the slider requests the corresponding preview frame."""
+        calls: list[int] = []
+        tab._preview_2d.show_frame = lambda f: calls.append(f)
+        tab._slider.setValue(42)
+        assert 42 in calls
 
 
 # ============================================================================
@@ -805,3 +855,80 @@ class TestScenario8PlaySync:
         window._analysis_tab._slider.setValue(35)
         _pump()
         assert window._recon_tab._slider.value() == 35
+
+
+# ============================================================================
+# Scenario 9 — Confidence threshold control
+# ============================================================================
+
+def _make_pose3d_with_lknee_conf(tmp_path: Path, knee_conf: float, T: int = 40) -> str:
+    """Standing pose where the L Knee joint (idx 13) has a fixed low confidence.
+
+    Every other joint stays at conf=1.0.  Lets a test verify that raising the
+    Analysis tab threshold above *knee_conf* drops the L Knee Flex angle to NaN.
+    """
+    zup = np.tile(_STANDING_ZUP, (T, 1, 1, 1))
+    cv = _zup_to_opencv(zup)
+    conf = np.ones((T, 1, 17), dtype=np.float32)
+    conf[:, 0, 13] = knee_conf      # L Knee vertex
+    meta = {"fps": FPS, "model_name": "synthetic"}
+    path = str(tmp_path / "lowconf.npz")
+    np.savez(path, joints3d=cv, conf3d=conf, meta=np.array(meta))
+    return path
+
+
+class TestScenario9ConfidenceThreshold:
+    """
+    Clinical rationale: Markerless keypoints vary in reliability frame to
+    frame.  A clinician must be able to exclude low-confidence detections so
+    that an angle is reported only when its underlying joints were tracked
+    reliably — otherwise noisy keypoints inflate ROM and corrupt the mean.
+    The control re-filters the already-reconstructed data live (no re-run).
+    """
+
+    @pytest.fixture
+    def tab(self, qtbot, tmp_path):
+        # L Knee confidence = 0.20; all other joints fully confident.
+        path = _make_pose3d_with_lknee_conf(tmp_path, knee_conf=0.20)
+        w = AnalysisTab()
+        qtbot.addWidget(w)
+        w.show()
+        w.load_pose3d(path)
+        _pump()
+        return w
+
+    def test_default_threshold_keeps_low_conf_knee(self, tab):
+        """At the default 0.0 threshold the L Knee Flex angle is computed."""
+        assert tab._conf_spin.value() == 0.0
+        assert tab._full_table.item(_LKNEE, 2).text() != "—"   # Mean column
+
+    def test_raising_threshold_drops_low_conf_angle_to_dash(self, tab):
+        """Raising the threshold above the knee confidence NaNs the L Knee row."""
+        tab._conf_spin.setValue(0.50)   # > 0.20 → L Knee excluded
+        _pump()
+        for c in range(tab._full_table.columnCount()):
+            assert tab._full_table.item(_LKNEE, c).text() == "—", (
+                f"L Knee col {c} still populated after raising confidence threshold"
+            )
+
+    def test_unaffected_angle_still_present_after_raise(self, tab):
+        """An angle not using the low-conf joint (R Knee) stays populated."""
+        tab._conf_spin.setValue(0.50)
+        _pump()
+        assert tab._full_table.item(_RKNEE, 2).text() != "—"
+
+    def test_lowering_threshold_restores_angle(self, tab):
+        """Dropping the threshold back below the knee confidence restores it."""
+        tab._conf_spin.setValue(0.50)
+        _pump()
+        tab._conf_spin.setValue(0.10)   # < 0.20 → L Knee back in
+        _pump()
+        assert tab._full_table.item(_LKNEE, 2).text() != "—"
+
+    def test_threshold_change_is_safe_with_no_data(self, qtbot):
+        """Moving the spinbox before loading must not raise."""
+        w = AnalysisTab()
+        qtbot.addWidget(w)
+        w.show()
+        w._conf_spin.setValue(0.7)   # no data loaded — must be a no-op
+        _pump()

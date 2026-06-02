@@ -27,7 +27,7 @@ from PySide6.QtCore import Qt
 from app.gui.calib_tab import CalibTab
 from app.gui.recon_tab import ReconTab
 
-_PROJECT = Path(__file__).parents[2] / "data" / "Test project"
+_PROJECT = Path(__file__).parents[2] / "data" / "Test project" / "test_fixture"
 _CALIB = _PROJECT / "calibration.yml"
 _P2D_L = _PROJECT / "pose2d_left.npz"
 _P2D_R = _PROJECT / "pose2d_right.npz"
