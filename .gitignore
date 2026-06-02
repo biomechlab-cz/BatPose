@@ -13,8 +13,18 @@ build/
 .DS_Store
 *.swp
 
-# Large test data files (videos, etc.) — keep local only
-data/
+# Large test data files (videos, etc.) — keep local only.
+# Exception: the small frozen test fixture (calibration + pose2d NPZ) IS tracked
+# so the integration/UI tests can run on a fresh clone / CI.  A parent dir that
+# is ignored as a whole cannot have children re-included, so each level down to
+# the fixture is ignored-by-contents (/*) and then the dir is re-included (!).
+# The fixture *files* are re-included further down — AFTER the *.npz / *.avi
+# artifact rules — because the last matching pattern wins.
+data/*
+!data/Test project/
+data/Test project/*
+!data/Test project/test_fixture/
+data/Test project/test_fixture/*
 
 # Vendored third-party wheels (PySpin / spinnaker-python — license forbids redistribution)
 external/
@@ -23,6 +33,12 @@ external/
 pose3d.npz
 *.avi
 *.npz
+
+# Re-include the tracked test fixture (last-match-wins, so this must come after
+# the *.npz / *.avi rules above) — small files the CI test suite depends on.
+!data/Test project/test_fixture/calibration.yml
+!data/Test project/test_fixture/pose2d_left.npz
+!data/Test project/test_fixture/pose2d_right.npz
 
 # Dev scratch
 .write_test
