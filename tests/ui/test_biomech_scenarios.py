@@ -932,3 +932,51 @@ class TestScenario9ConfidenceThreshold:
         w.show()
         w._conf_spin.setValue(0.7)   # no data loaded — must be a no-op
         _pump()
+
+
+# ============================================================================
+# Scenario 10 — Floor world-frame pose3d is used as-is (no OpenCV→Zup swap)
+# ============================================================================
+
+def _make_world_frame_pose3d(tmp_path: Path, T: int = 30) -> tuple[str, np.ndarray]:
+    """pose3d.npz already in a Z-up floor world frame (meta coordinate_frame='world')."""
+    joints = np.tile(_STANDING_ZUP, (T, 1, 1, 1)).astype(np.float32)  # Z-up already
+    conf = np.ones((T, 1, 17), dtype=np.float32)
+    meta = {"fps": FPS, "model_name": "synthetic", "coordinate_frame": "world"}
+    path = str(tmp_path / "world_pose3d.npz")
+    np.savez(path, joints3d=joints, conf3d=conf, meta=np.array(meta))
+    return path, joints
+
+
+class TestScenario10WorldFrameConsumed:
+    """
+    Clinical rationale: once the floor coordinate system is set, the stored
+    pose3d is already in real Z-up world metres.  The Analysis tab must use it
+    directly — applying the legacy OpenCV→Z-up swap on top would rotate the
+    skeleton into a wrong, non-physical frame and corrupt every angle.
+    """
+
+    def test_world_frame_pose_used_without_swap(self, qtbot, tmp_path):
+        path, joints = _make_world_frame_pose3d(tmp_path)
+        w = AnalysisTab()
+        qtbot.addWidget(w)
+        w.show()
+        w.load_pose3d(path)
+        _pump()
+        # No swap applied: internal Z-up array equals the stored joints.
+        assert np.allclose(w._joints_zup, joints, atol=1e-5)
+
+    def test_opencv_frame_pose_is_swapped(self, qtbot, tmp_path):
+        """Contrast: a default (opencv) pose3d IS swapped on load."""
+        path = _make_standing_pose3d(tmp_path, T=30)  # meta has no coordinate_frame
+        d = np.load(path, allow_pickle=True)
+        cv_joints = d["joints3d"]
+        w = AnalysisTab()
+        qtbot.addWidget(w)
+        w.show()
+        w.load_pose3d(path)
+        _pump()
+        expected = np.stack(
+            [cv_joints[..., 0], cv_joints[..., 2], -cv_joints[..., 1]], axis=-1
+        )
+        assert np.allclose(w._joints_zup, expected, atol=1e-5)

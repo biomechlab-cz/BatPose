@@ -229,6 +229,11 @@ class CaptureTab(QWidget):
     recording_saved = Signal(str, str)  # left_avi_path, right_avi_path
     calibration_saved = Signal(str)  # calibration.yml path
 
+    #: Suggested capture rate during calibration — board detection is CPU-heavy
+    #: and can't keep up with 50 fps, so the camera buffer drops frames.  ~20 fps
+    #: leaves ample headroom while still giving smooth board feedback.
+    _CALIB_FPS = 20.0
+
     # Pose-diversity grid constants
     _CALIB_GRID = 4  # divide each image axis into this many cells
     _CALIB_MAX_PER_CELL = 3  # max captures whose board centroid falls in one cell
@@ -265,7 +270,25 @@ class CaptureTab(QWidget):
         self._detect_frame_fr: np.ndarray | None = None
         self._last_frame = None  # most recent CaptureFrame (for re-render)
         self._last_auto_capture_time: float = 0.0
+        # Rate-limit live board detection.  ChArUco detection at full 1920×1200
+        # with the fisheye-tuned params is very CPU-heavy; running it back-to-back
+        # saturates the cores and starves the capture-read thread, so the camera's
+        # NewestOnly buffer drops frames (shown as "Drops").  ~5 detections/sec is
+        # ample for live feedback / auto-capture and leaves cores for the reader.
+        self._last_detect_submit: float = 0.0
+        self._detect_min_interval_s: float = 0.2
+        # Calibration fps override: calibration runs best at a lower fps (heavy
+        # board detection can't keep up with 50 fps → dropped frames).  When the
+        # user accepts the suggestion we drop to _CALIB_FPS for the duration of
+        # calibration and restore their fps on exit.  _precalib_fps holds the
+        # original; _calib_fps_active flags that a restore is pending.
+        self._calib_fps_active: bool = False
+        self._precalib_fps: float | None = None
         self._detector = None  # BoardDetector | None
+        # Path of the calibration.yml saved this session (or found on open) —
+        # gates the "Set coordinate system" button and is the file patched with
+        # the floor world frame.
+        self._calib_saved_path: str | None = None
         # The outer pool only ever has one in-flight orchestration task at a time;
         # max_workers=1 is fine here.  The actual left/right parallelism happens
         # inside _detect_pair via _detect_lr_pool below.
@@ -363,7 +386,8 @@ class CaptureTab(QWidget):
             "right_serial": self._right_combo.currentText(),
             "primary": "left" if self._primary_left.isChecked() else "right",
             "sync": self._sync_check.isChecked(),
-            "fps": self._fps_spin.value(),
+            # Persist the user's real fps, not a transient calibration override.
+            "fps": self._precalib_fps if self._calib_fps_active else self._fps_spin.value(),
             "exposure_us": self._exposure_spin.value(),
             "gain_db": self._gain_spin.value(),
             "out_folder": self._out_edit.text(),
@@ -964,6 +988,21 @@ class CaptureTab(QWidget):
         self._calib_run_btn.clicked.connect(self._on_run_calib)
         cap_v.addWidget(self._calib_run_btn)
 
+        # Define the floor world coordinate system from a board lying on the
+        # floor (visible to both cameras).  Enabled only once a calibration
+        # exists — it needs the intrinsics/extrinsics to triangulate the board.
+        self._set_coord_btn = QPushButton("Set coordinate system")
+        self._set_coord_btn.setEnabled(False)
+        self._set_coord_btn.setMinimumHeight(28)
+        self._set_coord_btn.setToolTip(
+            "Place the calibration board flat on the floor where both cameras "
+            "see it, then click.\nDefines the world origin at the board centre, "
+            "X along its long side, Y along its short side, Z up.\n"
+            "Stored in calibration.yml and used for all further analysis."
+        )
+        self._set_coord_btn.clicked.connect(self._on_set_coordinate_system)
+        cap_v.addWidget(self._set_coord_btn)
+
         self._calib_progress_bar = QProgressBar()
         self._calib_progress_bar.setRange(0, 100)
         self._calib_progress_bar.setValue(0)
@@ -1252,16 +1291,7 @@ class CaptureTab(QWidget):
         if source is None:
             return
 
-        self._worker = CaptureWorker(source)
-        # deleteLater must be connected BEFORE our finished slot so Qt has
-        # already scheduled C++ cleanup by the time we drop the Python reference.
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.frame_ready.connect(self._on_frame_ready)
-        self._worker.recording_finished.connect(self._on_recording_finished)
-        self._worker.progress.connect(lambda _pct, msg: self._status_label.setText(msg))
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.error.connect(self._on_worker_error)
-        self._worker.start()
+        self._make_and_start_worker(source)
 
         self._sync_history.clear()
         self._start_btn.setEnabled(False)
@@ -1274,6 +1304,64 @@ class CaptureTab(QWidget):
         self._left_combo.setEnabled(False)
         self._right_combo.setEnabled(False)
         self._status_label.setText("Streaming…")
+
+    def _make_and_start_worker(self, source) -> None:
+        """Create, wire and start a CaptureWorker around *source*."""
+        self._worker = CaptureWorker(source)
+        # deleteLater must be connected BEFORE our finished slot so Qt has
+        # already scheduled C++ cleanup by the time we drop the Python reference.
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.frame_ready.connect(self._on_frame_ready)
+        self._worker.recording_finished.connect(self._on_recording_finished)
+        self._worker.progress.connect(lambda _pct, msg: self._status_label.setText(msg))
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.error.connect(self._on_worker_error)
+        self._worker.start()
+
+    def _restart_stream_at_fps(self, new_fps: float) -> bool:
+        """Stop the current stream and restart it at *new_fps*.
+
+        A full restart (vs a live frame-rate change) re-runs the sync/photometric
+        configuration, so the cameras come back up correctly synchronised at the
+        new rate.  Returns True if a stream is running afterwards.
+        """
+        if self._worker is None:
+            self._fps_spin.setValue(new_fps)
+            return False
+
+        old = self._worker
+        self._worker = None
+        # Detach the old worker so its finished/error signals don't run our
+        # teardown slot (which would hide the calibration panel mid-restart).
+        for sig, slot in (
+            (old.frame_ready, self._on_frame_ready),
+            (old.recording_finished, self._on_recording_finished),
+            (old.finished, self._on_worker_finished),
+            (old.error, self._on_worker_error),
+        ):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+        if self._is_recording:
+            old.end_recording()
+            self._is_recording = False
+        old.cancel()
+        if not old.wait(5000):  # let FlirCapture.stop() release the cameras
+            old.terminate()
+            old.wait(1000)
+        old.deleteLater()
+
+        self._sync_history.clear()
+        self._fps_spin.setValue(new_fps)
+        source = self._build_source()
+        if source is None:
+            self._status_label.setText("Restart failed — could not rebuild the capture source.")
+            return False
+        self._make_and_start_worker(source)
+        self._status_label.setText(f"Streaming… ({new_fps:.0f} fps)")
+        return True
 
     def _on_stop(self) -> None:
         if self._worker is not None:
@@ -1336,11 +1424,17 @@ class CaptureTab(QWidget):
             # Skip submission once cleanup() has shut the pool down — otherwise
             # any in-flight CaptureWorker frame would crash with
             # "cannot schedule new futures after shutdown".
+            now = time.monotonic()
             if (
                 self._detect_future is None
                 and self._detector is not None
                 and not self._pool_shutdown
+                # Rate-limit: don't start another detection until the minimum
+                # interval has elapsed, so detection can't monopolise the CPU
+                # and starve the capture-read thread (→ dropped frames).
+                and (now - self._last_detect_submit) >= self._detect_min_interval_s
             ):
+                self._last_detect_submit = now
                 fl = frame.frame_left.copy()
                 fr = frame.frame_right.copy()
                 self._detect_submitted_fl = fl  # remember what we submitted
@@ -1535,6 +1629,13 @@ class CaptureTab(QWidget):
 
     def _on_worker_finished(self, _result: object) -> None:
         self._worker = None
+        # If the stream stopped while a calibration fps override was active,
+        # there is nothing to restart — just restore the displayed/persisted
+        # rate to the user's original so it isn't left stuck at the calib value.
+        if self._calib_fps_active and self._precalib_fps is not None:
+            self._fps_spin.setValue(self._precalib_fps)
+            self._calib_fps_active = False
+            self._precalib_fps = None
         self._is_recording = False
         self._record_btn.setEnabled(False)
         self._record_btn.setChecked(False)
@@ -1627,6 +1728,17 @@ class CaptureTab(QWidget):
         self._calib_capture_btn.setEnabled(False)
         self._calib_capture_btn.setStyleSheet("")
 
+        # Restore the user's original frame rate if we lowered it for calibration.
+        if self._calib_fps_active and self._precalib_fps is not None:
+            original = self._precalib_fps
+            self._calib_fps_active = False
+            self._precalib_fps = None
+            if self._worker is not None:
+                self._status_label.setText(f"Restoring {original:.0f} fps…")
+                self._restart_stream_at_fps(original)
+            else:
+                self._fps_spin.setValue(original)
+
     def _apply_calib_open(self) -> None:
         """Open the calibration panel and initialise the board detector."""
         try:
@@ -1651,6 +1763,45 @@ class CaptureTab(QWidget):
         self._calib_panel.setVisible(True)
         self._update_calib_counter()
         self._reset_detection_labels()
+
+        # If a calibration already exists at the output path, allow defining the
+        # floor world frame straight away (no need to re-run calibration).
+        existing = self._calib_out_edit.text().strip()
+        if existing and Path(existing).is_file():
+            self._calib_saved_path = existing
+            self._set_coord_btn.setEnabled(True)
+
+        # Suggest dropping to the calibration-optimal fps if the live stream is
+        # running faster (board detection can't keep up → dropped frames).
+        self._maybe_lower_fps_for_calibration()
+
+    def _maybe_lower_fps_for_calibration(self) -> None:
+        """Offer to restart the stream at the calibration-optimal fps."""
+        if self._worker is None:
+            return  # not streaming — nothing to change
+        current = float(self._fps_spin.value())
+        if current <= self._CALIB_FPS:
+            return  # already at/below optimal
+        ans = QMessageBox.question(
+            self,
+            "Lower frame rate for calibration?",
+            f"Calibration runs best at about <b>{self._CALIB_FPS:.0f} fps</b>.<br><br>"
+            f"Board detection is CPU-intensive; at the current "
+            f"<b>{current:.0f} fps</b> the cameras can deliver frames faster than "
+            f"they can be processed, which shows up as dropped frames "
+            f"(and a misleading sync warning).<br><br>"
+            f"Drop to {self._CALIB_FPS:.0f} fps for calibration? The stream will "
+            f"restart and your original rate is restored when you leave "
+            f"Calibration Mode.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self._precalib_fps = current
+        self._calib_fps_active = True
+        self._status_label.setText(f"Restarting at {self._CALIB_FPS:.0f} fps for calibration…")
+        self._restart_stream_at_fps(self._CALIB_FPS)
 
     # ------------------------------------------------------------------
     # Live Pose Tracking — handlers
@@ -2451,6 +2602,10 @@ class CaptureTab(QWidget):
         except Exception as exc:
             self._calib_status_label.setText(f"Saved (metrics unavailable: {exc})")
 
+        # Calibration exists now → the floor coordinate system can be defined.
+        self._calib_saved_path = out_path
+        self._set_coord_btn.setEnabled(True)
+
         self.calibration_saved.emit(out_path)
 
     def _on_calib_error(self, msg: str) -> None:
@@ -2459,6 +2614,116 @@ class CaptureTab(QWidget):
         self._update_calib_counter()
         self._calib_status_label.setText(f"<span style='color:#e74c3c'>Error: {msg}</span>")
         QMessageBox.critical(self, "Calibration error", msg)
+
+    # ------------------------------------------------------------------
+    # Floor world coordinate system
+    # ------------------------------------------------------------------
+
+    def _on_set_coordinate_system(self) -> None:
+        """Define the world frame from a board lying flat on the floor.
+
+        Detects the board in the current live frame from both cameras,
+        triangulates its corners, builds a board-centred world frame
+        (X=long side, Y=short side, Z=up), stores it in calibration.yml, and
+        draws the axis triad on both preview panels.
+        """
+        from pathlib import Path as _Path
+
+        if self._last_frame is None:
+            QMessageBox.warning(self, "No frame", "Start the cameras first — no live frame to analyse.")
+            return
+        if not self._calib_saved_path or not _Path(self._calib_saved_path).is_file():
+            QMessageBox.warning(self, "Not calibrated", "Run or load a calibration first.")
+            return
+
+        if self._detector is None:
+            try:
+                from app.calib.board import make_detector
+
+                self._detector = make_detector(self._live_board_cfg())
+            except Exception as exc:
+                QMessageBox.warning(self, "Board config error", str(exc))
+                return
+
+        fl, fr = self._last_frame.frame_left, self._last_frame.frame_right
+        try:
+            det_l, det_r = CaptureTab._detect_pair(self._detector, fl, fr)
+        except Exception as exc:
+            QMessageBox.warning(self, "Detection error", str(exc))
+            return
+
+        def _ok(d) -> bool:
+            return d is not None and not getattr(d, "partial", False) and len(d.img_pts) > 0
+
+        if not (_ok(det_l) and _ok(det_r)):
+            QMessageBox.warning(
+                self,
+                "Board not detected",
+                "The board must be fully visible to BOTH cameras.\n\n"
+                "Lay it flat on the floor where both cameras see it clearly, then "
+                "try again.",
+            )
+            return
+
+        from app.calib.coordinate_system import axis_endpoints_cam1, compute_world_frame
+        from app.calib.stereo import load_calibration, update_world_frame
+
+        calib = load_calibration(self._calib_saved_path)
+        try:
+            wf = compute_world_frame(det_l, det_r, calib)
+        except Exception as exc:
+            QMessageBox.warning(self, "Coordinate system", f"Could not compute world frame:\n{exc}")
+            return
+
+        update_world_frame(self._calib_saved_path, wf)
+
+        # Draw the axis triad on both previews (X red, Y green, Z blue).
+        try:
+            self._draw_world_axes(wf, calib, fl, fr)
+        except Exception:
+            pass  # visualization is best-effort; the frame is already saved
+
+        self._calib_status_label.setText(
+            f"<b>✓ Coordinate system set</b> — origin at board centre; "
+            f"X={wf['board_long_m'] * 100:.0f} cm (long side), "
+            f"Y={wf['board_short_m'] * 100:.0f} cm (short side), Z up. "
+            f"Fit RMS {wf['fit_rms_m'] * 1000:.1f} mm over {wf['n_corners']} corners. "
+            f"Saved to {_Path(self._calib_saved_path).name}."
+        )
+        # Re-emit so the Reconstruction tab reloads the (now world-aware) calib.
+        self.calibration_saved.emit(self._calib_saved_path)
+
+    def _draw_world_axes(self, world_frame: dict, calib: dict, fl: np.ndarray, fr: np.ndarray) -> None:
+        """Project the world-frame axis triad into both views and show it."""
+        from app.calib.coordinate_system import axis_endpoints_cam1
+        from app.recon3d.triangulate import project_points
+
+        fisheye = calib.get("lens_model", "standard") == "fisheye"
+        pts3d = axis_endpoints_cam1(world_frame)  # [4,3] in camera-1 coords
+
+        # Left camera: points already in camera-1 frame (R=I, t=0).
+        px_l = project_points(pts3d, calib["K1"], calib["D1"], np.eye(3), np.zeros(3), fisheye)
+        # Right camera: transform camera-1 → camera-2 via the stereo extrinsics.
+        px_r = project_points(
+            pts3d, calib["K2"], calib["D2"], calib["R"], calib["T"].reshape(3), fisheye
+        )
+
+        _set_preview(self._preview_left, CaptureTab._draw_axes(fl.copy(), px_l))
+        _set_preview(self._preview_right, CaptureTab._draw_axes(fr.copy(), px_r))
+
+    @staticmethod
+    def _draw_axes(bgr: np.ndarray, px: np.ndarray) -> np.ndarray:
+        """Draw the [origin, +X, +Y, +Z] triad given 4 projected pixel points."""
+        o = (int(round(px[0, 0])), int(round(px[0, 1])))
+        # BGR: X=red, Y=green, Z=blue (matches the 3D viewer legend).
+        for i, (col, lab) in enumerate(
+            [((0, 0, 255), "X"), ((0, 255, 0), "Y"), ((255, 0, 0), "Z")], start=1
+        ):
+            p = (int(round(px[i, 0])), int(round(px[i, 1])))
+            cv2.line(bgr, o, p, col, 3, cv2.LINE_AA)
+            cv2.putText(bgr, lab, p, cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3, cv2.LINE_AA)
+        cv2.circle(bgr, o, 6, (255, 255, 255), -1, cv2.LINE_AA)
+        return bgr
 
     # ------------------------------------------------------------------
     # Source factory

@@ -295,7 +295,13 @@ class AnalysisTab(QWidget):
 
         self._pose3d_path = path
         self._fps = float(meta.get("fps", 30.0))
-        self._joints_zup = _opencv_to_zup(joints_cv)
+        # When the pipeline already expressed joints in a Z-up floor world frame
+        # ("Set coordinate system"), use them as-is; otherwise apply the
+        # OpenCV→Z-up swap (angles are always computed in a Z-up frame).
+        if meta.get("coordinate_frame") == "world":
+            self._joints_zup = np.asarray(joints_cv, dtype=np.float32)
+        else:
+            self._joints_zup = _opencv_to_zup(joints_cv)
         self._conf3d = conf3d
         self._n_frames, self._n_persons = self._joints_zup.shape[:2]
         self._angles = compute_joint_angles(

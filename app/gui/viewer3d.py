@@ -183,27 +183,35 @@ class SkeletonViewer3D(QWidget):
         legend_widget.setLayout(legend)
         layout.addWidget(legend_widget)
 
-    def set_data(self, joints3d: np.ndarray, conf3d: np.ndarray) -> None:
+    def set_data(
+        self, joints3d: np.ndarray, conf3d: np.ndarray, world_frame: bool = False
+    ) -> None:
         """
         Load a new skeleton sequence.
 
-        The incoming data is in OpenCV camera-1 coordinates (X right, Y down,
-        Z forward — the raw output of the triangulation pipeline).  We transform
-        to the viewer's Z-up world frame so the skeleton appears upright and the
-        axis legend (X lateral, Y anterior, Z vertical-up) is correct:
+        By default the incoming data is in OpenCV camera-1 coordinates (X right,
+        Y down, Z forward — the raw triangulator output) and we swap it to the
+        viewer's Z-up world frame so the skeleton appears upright:
 
             viewer.X =  cam.X   (lateral, right positive)
             viewer.Y =  cam.Z   (anterior / depth)
             viewer.Z = -cam.Y   (vertical, up positive)
 
+        If *world_frame* is True the data is ALREADY in a Z-up floor world frame
+        (a "Set coordinate system" board frame), so the swap is skipped and the
+        points are shown as-is (origin on the floor, real metres).
+
         Args:
-            joints3d: float32 [T, P, 17, 3] — 3D positions in metres (camera frame)
+            joints3d: float32 [T, P, 17, 3] — 3D positions in metres
             conf3d:   float32 [T, P, 17]    — confidence [0, 1]
+            world_frame: True if joints3d is already a Z-up world frame.
         """
         joints3d = np.nan_to_num(joints3d, nan=0.0, posinf=0.0, neginf=0.0)
-        # OpenCV camera → Z-up world frame (same transform as live mode in set_frame)
-        j = joints3d
-        joints3d = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1).astype(np.float32)
+        if not world_frame:
+            # OpenCV camera → Z-up world frame (same swap as live set_frame).
+            j = joints3d
+            joints3d = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
+        joints3d = joints3d.astype(np.float32)
 
         self._joints3d = joints3d
         self._conf3d = conf3d

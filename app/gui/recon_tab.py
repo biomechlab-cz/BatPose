@@ -973,7 +973,11 @@ class ReconTab(QWidget):
             conf3d = d["conf3d"]  # [T, P, 17]
             meta = d["meta"].item()
 
-            self._viewer.set_data(joints3d, conf3d)
+            # If the pipeline already expressed joints in a Z-up floor world
+            # frame (a "Set coordinate system" board frame), the viewer must NOT
+            # re-apply its OpenCV→Z-up swap.
+            already_world = meta.get("coordinate_frame") == "world"
+            self._viewer.set_data(joints3d, conf3d, world_frame=already_world)
             T = joints3d.shape[0]
             fps = float(meta.get("fps", 30.0))
 

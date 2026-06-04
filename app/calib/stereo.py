@@ -1220,8 +1220,33 @@ def save_calibration(calib_data: dict, board_cfg: dict, output_path: str) -> Non
         },
     }
 
+    # Optional floor-board world frame (set via "Set coordinate system").
+    # When present, the recon pipeline expresses pose3d in this frame; when
+    # absent, behaviour is unchanged (camera-1 frame + viewer Z-up swap).
+    world_frame = calib_data.get("world_frame")
+    if world_frame is not None:
+        out["world_frame"] = world_frame
+
     with open(output_path, "w") as fh:
         yaml.dump(out, fh, default_flow_style=False, sort_keys=False)
+
+
+def update_world_frame(path: str, world_frame: dict | None) -> None:
+    """Patch an existing calibration.yml with a floor-board ``world_frame``.
+
+    Loads the YAML, sets/replaces the ``world_frame`` key (or removes it when
+    *world_frame* is None), and writes it back — leaving all other calibration
+    fields untouched.  Used by the "Set coordinate system" action, which runs
+    after calibration has already been saved.
+    """
+    with open(path) as fh:
+        data = yaml.safe_load(fh) or {}
+    if world_frame is None:
+        data.pop("world_frame", None)
+    else:
+        data["world_frame"] = world_frame
+    with open(path, "w") as fh:
+        yaml.dump(data, fh, default_flow_style=False, sort_keys=False)
 
 
 def load_calibration(path: str) -> dict[str, Any]:
@@ -1256,4 +1281,6 @@ def load_calibration(path: str) -> dict[str, Any]:
         # Default "standard" so calibrations saved before this key existed
         # still load (they were all pinhole).
         "lens_model": data.get("lens_model", "standard"),
+        # Optional floor-board world frame (None if not set).
+        "world_frame": data.get("world_frame"),
     }

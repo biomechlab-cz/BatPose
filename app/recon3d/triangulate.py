@@ -155,6 +155,43 @@ def triangulate_frame_pair(
     return out_3d, out_conf, out_err
 
 
+def project_points(
+    pts3d: np.ndarray,
+    K: np.ndarray,
+    D: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    fisheye: bool = False,
+) -> np.ndarray:
+    """Project 3D points to pixels using the lens-model-aware camera model.
+
+    Args:
+        pts3d:   [N, 3] 3D points (in the frame R,t transform FROM).
+        K:       [3, 3] camera intrinsic matrix.
+        D:       distortion coefficients (5/8 pinhole, 4 fisheye).
+        R:       [3, 3] rotation (source frame → camera frame).
+        t:       [3] or [3, 1] translation.
+        fisheye: use cv2.fisheye.projectPoints (must match the calibration).
+
+    Returns:
+        [N, 2] float64 pixel coordinates.
+    """
+    rvec, _ = cv2.Rodrigues(R.astype(np.float64))
+    tvec = np.asarray(t, dtype=np.float64).reshape(3, 1)
+    if fisheye:
+        # fisheye.projectPoints is picky: object points must be (N,1,3) float64
+        # contiguous, distortion exactly 4 coeffs.
+        obj = np.ascontiguousarray(pts3d.reshape(-1, 1, 3), dtype=np.float64)
+        proj, _ = cv2.fisheye.projectPoints(
+            obj, rvec, tvec, K.astype(np.float64), D.astype(np.float64).reshape(4, 1)
+        )
+    else:
+        proj, _ = cv2.projectPoints(
+            pts3d.astype(np.float64), rvec, tvec, K.astype(np.float64), D.astype(np.float64)
+        )
+    return proj.reshape(-1, 2)
+
+
 def reprojection_error(
     pts3d: np.ndarray,
     K: np.ndarray,
@@ -179,28 +216,6 @@ def reprojection_error(
     Returns:
         err: [N] float32 per-point reprojection error (pixels)
     """
-    rvec, _ = cv2.Rodrigues(R.astype(np.float64))
-    tvec = t.reshape(3, 1).astype(np.float64)
-
-    if fisheye:
-        # fisheye.projectPoints is picky: object points must be (N,1,3) float64
-        # contiguous, distortion exactly 4 coeffs.
-        obj = np.ascontiguousarray(pts3d.reshape(-1, 1, 3), dtype=np.float64)
-        proj, _ = cv2.fisheye.projectPoints(
-            obj,
-            rvec,
-            tvec,
-            K.astype(np.float64),
-            D.astype(np.float64).reshape(4, 1),
-        )
-    else:
-        proj, _ = cv2.projectPoints(
-            pts3d.astype(np.float64),
-            rvec,
-            tvec,
-            K.astype(np.float64),
-            D.astype(np.float64),
-        )  # [N, 1, 2]
-    proj = proj.reshape(-1, 2)
+    proj = project_points(pts3d, K, D, R, t, fisheye=fisheye)
     err = np.linalg.norm(proj - pts2d_observed.astype(np.float64), axis=1)
     return err.astype(np.float32)

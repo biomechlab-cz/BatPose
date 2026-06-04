@@ -191,6 +191,19 @@ def reconstruct3d(
                 traj = joints3d[:, p, j, :]  # [T, 3]
                 joints3d[:, p, j, :] = smooth_trajectory(traj, fps, min_cutoff, beta, d_cutoff)
 
+    # Express joints in the floor-board world frame if calibration defines one.
+    # Otherwise leave them in the camera-1 OpenCV frame (consumers then apply the
+    # legacy Z-up swap).  The frame is recorded in meta so consumers know which.
+    world_frame = calib.get("world_frame")
+    coordinate_frame = "opencv"
+    if world_frame is not None:
+        from ..calib.coordinate_system import apply_world_frame
+
+        if progress_cb:
+            progress_cb(93, "Transforming to floor world frame…")
+        joints3d = apply_world_frame(joints3d, world_frame).astype(np.float32)
+        coordinate_frame = "world"
+
     if progress_cb:
         progress_cb(95, "Saving results…")
 
@@ -208,6 +221,10 @@ def reconstruct3d(
         "calibration_file": str(calib_path),
         "smoothing": "none" if no_smooth else "oneeuro",
         "smooth_params": {} if no_smooth else {"min_cutoff": min_cutoff, "beta": beta, "d_cutoff": d_cutoff},
+        # "world" → joints3d already in the Z-up floor frame (no swap downstream);
+        # "opencv" → camera-1 frame (consumers apply the X,Z,-Y swap, as before).
+        "coordinate_frame": coordinate_frame,
+        "world_frame": world_frame,
     }
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
