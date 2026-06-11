@@ -41,11 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _write_csv(csv_path: str, joints3d, conf3d, fps: float) -> None:
+def _write_csv(
+    csv_path: str, joints3d, conf3d, fps: float, coordinate_frame: str = "opencv"
+) -> None:
     """Write joints3d / conf3d arrays to a flat CSV file plus a sidecar metadata JSON.
 
     CSV columns: frame, time_s, person, j0_x, j0_y, j0_z, j0_conf, j1_x, ...
-    Metadata JSON: <csv_stem>_metadata.json with fps, coordinate_units, n_frames, n_joints.
+    Metadata JSON: <csv_stem>_metadata.json with fps, coordinate_units,
+    coordinate_frame ("opencv" camera frame vs "world" floor frame), n_frames, n_joints.
     joints3d: [T, P, J, 3]   conf3d: [T, P, J]
     """
 
@@ -74,6 +77,9 @@ def _write_csv(csv_path: str, joints3d, conf3d, fps: float) -> None:
     metadata = {
         "fps": fps,
         "coordinate_units": "meters",
+        # "opencv" = camera-1 frame (X right, Y down, Z forward);
+        # "world"  = floor-board frame (origin on the floor, Z up) — ADR-010.
+        "coordinate_frame": coordinate_frame,
         "n_frames": T,
         "n_persons": P,
         "n_joints": J,
@@ -146,7 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  FPS:   {fps:.1f}")
 
     if args.export_csv:
-        _write_csv(args.export_csv, joints3d, conf3d, fps)
+        _write_csv(
+            args.export_csv,
+            joints3d,
+            conf3d,
+            fps,
+            coordinate_frame=str(meta.get("coordinate_frame", "opencv")),
+        )
         print(f"  CSV:   {args.export_csv}")
 
     return 0

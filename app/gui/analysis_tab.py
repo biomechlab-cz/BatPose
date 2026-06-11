@@ -52,9 +52,9 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QStyle,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -76,13 +76,13 @@ from app.gui.viewer3d import SkeletonViewer3D
 
 _CURVE_COLORS: list[tuple[int, int, int]] = [
     (100, 149, 237),  # L Knee Flex   — cornflower blue
-    (220, 80,  80),   # R Knee Flex   — coral red
-    (64,  196, 255),  # L Hip Flex    — cyan
-    (255, 128, 64),   # R Hip Flex    — orange
+    (220, 80, 80),  # R Knee Flex   — coral red
+    (64, 196, 255),  # L Hip Flex    — cyan
+    (255, 128, 64),  # R Hip Flex    — orange
     (100, 220, 100),  # L Elbow Flex  — green
     (180, 100, 220),  # R Elbow Flex  — purple
-    (40,  180, 160),  # L Shoulder    — teal
-    (220, 180, 40),   # R Shoulder    — gold
+    (40, 180, 160),  # L Shoulder    — teal
+    (220, 180, 40),  # R Shoulder    — gold
     (200, 200, 200),  # Trunk         — grey
 ]
 
@@ -93,66 +93,50 @@ _PLAYBACK_SPEEDS = [0.25, 0.5, 1.0, 2.0]
 _MAX_PLAY_STEP = 4
 
 _TABLE_STYLE = (
-    "QTableWidget { font-size: 10px; }"
-    "QHeaderView::section { font-size: 10px; padding: 2px; }"
+    "QTableWidget { font-size: 10px; }QHeaderView::section { font-size: 10px; padding: 2px; }"
 )
 
 # Tooltip text for each column header — shown on mouse hover.
 # Shared across all three stats tables; keys match the header strings exactly.
 _HEADER_TOOLTIPS: dict[str, str] = {
-    "Min":
-        "Minimum angle (°)\n"
-        "Lowest value recorded in the selected range.",
-    "Max":
-        "Maximum angle (°)\n"
-        "Highest value recorded in the selected range.",
-    "Mean":
-        "Mean angle (°)\n"
-        "Average over all detected (non-NaN) frames.",
-    "SD":
-        "Standard Deviation (°)\n"
-        "Spread around the mean.\n"
-        "Higher SD = more variable / less consistent movement.",
-    "CV%":
-        "Coefficient of Variation (%)\n"
-        "= SD / |Mean| × 100\n"
-        "Normalises variability so joints with different baseline\n"
-        "angles (e.g. 5° trunk vs 90° knee) are comparable.",
-    "ROM":
-        "Range of Motion (°)\n"
-        "= Max − Min\n"
-        "Total arc covered during the recording or segment.",
-    "NaN%":
-        "Missing data (%)\n"
-        "Percentage of frames where one or more flanking joints\n"
-        "were not detected. Values > 20 % should be treated\n"
-        "with caution.",
-    "Exc(°)":
-        "Total Angular Excursion (°)\n"
-        "= Σ |θ[t+1] − θ[t]| over all consecutive frame pairs\n"
-        "Total path length traveled by the joint angle.\n"
-        "Larger than ROM when the joint oscillates back and forth.",
-    "Mean SI%":
-        "Symmetry Index for Mean angle  (Robinson 1987)\n"
-        "= 100 × (Left − Right) / (0.5 × (|Left| + |Right|))\n"
-        "Positive = left-dominant, negative = right-dominant.\n"
-        "Clinical threshold: |SI| > 10 % is considered asymmetric.",
-    "ROM SI%":
-        "Symmetry Index for Range of Motion\n"
-        "Asymmetry in how much each joint moves.\n"
-        "Return-to-sport criterion: Limb Symmetry Index ≥ 90 %\n"
-        "(equivalent to |SI| ≤ ~11 %).",
-    "PkVel SI%":
-        "Symmetry Index for Peak Angular Velocity  (deg/s)\n"
-        "Asymmetry in maximum movement speed.\n"
-        "Relevant for power-based tasks such as jumping, kicking,\n"
-        "or throwing.",
+    "Min": "Minimum angle (°)\nLowest value recorded in the selected range.",
+    "Max": "Maximum angle (°)\nHighest value recorded in the selected range.",
+    "Mean": "Mean angle (°)\nAverage over all detected (non-NaN) frames.",
+    "SD": "Standard Deviation (°)\n"
+    "Spread around the mean.\n"
+    "Higher SD = more variable / less consistent movement.",
+    "CV%": "Coefficient of Variation (%)\n"
+    "= SD / |Mean| × 100\n"
+    "Normalises variability so joints with different baseline\n"
+    "angles (e.g. 5° trunk vs 90° knee) are comparable.",
+    "ROM": "Range of Motion (°)\n= Max − Min\nTotal arc covered during the recording or segment.",
+    "NaN%": "Missing data (%)\n"
+    "Percentage of frames where one or more flanking joints\n"
+    "were not detected. Values > 20 % should be treated\n"
+    "with caution.",
+    "Exc(°)": "Total Angular Excursion (°)\n"
+    "= Σ |θ[t+1] − θ[t]| over all consecutive frame pairs\n"
+    "Total path length traveled by the joint angle.\n"
+    "Larger than ROM when the joint oscillates back and forth.",
+    "Mean SI%": "Symmetry Index for Mean angle  (Robinson 1987)\n"
+    "= 100 × (Left − Right) / (0.5 × (|Left| + |Right|))\n"
+    "Positive = left-dominant, negative = right-dominant.\n"
+    "Clinical threshold: |SI| > 10 % is considered asymmetric.",
+    "ROM SI%": "Symmetry Index for Range of Motion\n"
+    "Asymmetry in how much each joint moves.\n"
+    "Return-to-sport criterion: Limb Symmetry Index ≥ 90 %\n"
+    "(equivalent to |SI| ≤ ~11 %).",
+    "PkVel SI%": "Symmetry Index for Peak Angular Velocity  (deg/s)\n"
+    "Asymmetry in maximum movement speed.\n"
+    "Relevant for power-based tasks such as jumping, kicking,\n"
+    "or throwing.",
 }
 
 
 # ---------------------------------------------------------------------------
 # Custom ViewBox: left-drag = selection; Ctrl+left-drag = pan
 # ---------------------------------------------------------------------------
+
 
 class _SelectionViewBox(pg.ViewBox):
     """ViewBox that replaces left-drag panning with region selection.
@@ -172,7 +156,7 @@ class _SelectionViewBox(pg.ViewBox):
     def attach_roi(self, roi: pg.LinearRegionItem) -> None:
         self._roi = roi
 
-    def mouseDragEvent(self, ev, axis=None):          # noqa: N802
+    def mouseDragEvent(self, ev, axis=None):  # noqa: N802
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if ctrl or ev.button() != Qt.MouseButton.LeftButton or self._roi is None:
             # Fall back to normal pyqtgraph pan behaviour.
@@ -200,10 +184,11 @@ class _SelectionViewBox(pg.ViewBox):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _opencv_to_zup(joints_cv: np.ndarray) -> np.ndarray:
-    return np.stack(
-        [joints_cv[..., 0], joints_cv[..., 2], -joints_cv[..., 1]], axis=-1
-    ).astype(np.float32)
+    return np.stack([joints_cv[..., 0], joints_cv[..., 2], -joints_cv[..., 1]], axis=-1).astype(
+        np.float32
+    )
 
 
 def _fmt(value: float | None, decimals: int = 1) -> str:
@@ -215,6 +200,7 @@ def _fmt(value: float | None, decimals: int = 1) -> str:
 # ---------------------------------------------------------------------------
 # Main widget
 # ---------------------------------------------------------------------------
+
 
 class AnalysisTab(QWidget):
     """
@@ -315,8 +301,11 @@ class AnalysisTab(QWidget):
             self._person_combo.addItem(str(p))
         self._person_combo.blockSignals(False)
 
-        # 3D viewer
-        self._viewer.set_data(joints_cv, conf3d)
+        # 3D viewer — world-frame data is already Z-up; the viewer must skip its
+        # OpenCV→Z-up swap or the skeleton is rotated a second time.
+        self._viewer.set_data(
+            joints_cv, conf3d, world_frame=meta.get("coordinate_frame") == "world"
+        )
 
         # Playback slider
         self._slider.blockSignals(True)
@@ -397,9 +386,7 @@ class AnalysisTab(QWidget):
             cb.setChecked(True)
             cb.toggled.connect(self._on_angle_toggled)
             r, g, b = _CURVE_COLORS[k]
-            cb.setStyleSheet(
-                f"QCheckBox {{ color: rgb({r},{g},{b}); font-size: 11px; }}"
-            )
+            cb.setStyleSheet(f"QCheckBox {{ color: rgb({r},{g},{b}); font-size: 11px; }}")
             sel_layout.addWidget(cb)
             self._angle_checks.append(cb)
         outer.addWidget(sel_group)
@@ -437,9 +424,7 @@ class AnalysisTab(QWidget):
         # ── Statistics tabs (stretch=1 so they fill available height) ─
         self._stats_tabs = QTabWidget()
         self._stats_tabs.setDocumentMode(True)
-        self._stats_tabs.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        self._stats_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         outer.addWidget(self._stats_tabs, 1)
 
         # Tab 1: Full recording
@@ -484,10 +469,7 @@ class AnalysisTab(QWidget):
         roi_layout = QVBoxLayout(roi_group)
         roi_layout.setSpacing(4)
 
-        hint = QLabel(
-            "Drag on plot to select · CTRL+drag to pan · "
-            "drag edge to resize"
-        )
+        hint = QLabel("Drag on plot to select · CTRL+drag to pan · drag edge to resize")
         hint.setStyleSheet("color: #888; font-size: 9px;")
         hint.setWordWrap(True)
         roi_layout.addWidget(hint)
@@ -562,18 +544,14 @@ class AnalysisTab(QWidget):
         hh = t.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         hh.setMinimumSectionSize(36)
-        t.verticalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
+        t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         t.setStyleSheet(_TABLE_STYLE)
         t.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         for r in range(n_rows):
             for c in range(len(col_headers)):
                 item = QTableWidgetItem("—")
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                )
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 t.setItem(r, c, item)
         return t
 
@@ -635,7 +613,8 @@ class AnalysisTab(QWidget):
 
         # Frame cursor
         self._cursor = pg.InfiniteLine(
-            angle=90, movable=False,
+            angle=90,
+            movable=False,
             pen=pg.mkPen(color="w", width=1, style=Qt.PenStyle.DashLine),
         )
         pw.addItem(self._cursor)
@@ -731,7 +710,7 @@ class AnalysisTab(QWidget):
         # this one via seek_to_frame while it plays; the guard stops both tabs
         # decoding video per tick).  showEvent() catches up on tab switch.
         if self.isVisible():
-            self._viewer.show_frame(frame)   # cheap GL update — every frame
+            self._viewer.show_frame(frame)  # cheap GL update — every frame
             # Non-blocking: the preview decodes on a background thread and
             # coalesces to the latest requested frame, so driving it every
             # frame during playback does not stall the 3D view.
@@ -756,7 +735,7 @@ class AnalysisTab(QWidget):
         if checked:
             self._play_btn.setIcon(_si(SP.SP_MediaPause))
             self._play_frac = 0.0
-            self._play_clock.start()          # anchor the wall clock
+            self._play_clock.start()  # anchor the wall clock
             self._play_timer.start()
         else:
             self._play_btn.setIcon(_si(SP.SP_MediaPlay))
@@ -775,9 +754,7 @@ class AnalysisTab(QWidget):
         SP = QStyle.StandardPixmap
         self._play_btn.blockSignals(True)
         self._play_btn.setChecked(playing)
-        self._play_btn.setIcon(
-            _si(SP.SP_MediaPause) if playing else _si(SP.SP_MediaPlay)
-        )
+        self._play_btn.setIcon(_si(SP.SP_MediaPause) if playing else _si(SP.SP_MediaPlay))
         self._play_btn.blockSignals(False)
 
     def _on_timer_tick(self) -> None:
@@ -843,7 +820,9 @@ class AnalysisTab(QWidget):
         m, s = divmod(int(t), 60)
         total = max(0, self._n_frames - 1) / fps
         dm, ds = divmod(int(total), 60)
-        return f"Frame: {frame} / {max(0, self._n_frames - 1)}   {m:02d}:{s:02d} / {dm:02d}:{ds:02d}"
+        return (
+            f"Frame: {frame} / {max(0, self._n_frames - 1)}   {m:02d}:{s:02d} / {dm:02d}:{ds:02d}"
+        )
 
     # =========================================================================
     # Angle display slots
@@ -957,10 +936,7 @@ class AnalysisTab(QWidget):
             self._fill_table_row(self._seg_table, k, cells)
         self._stats_tabs.setCurrentIndex(1)
         label = self._roi_label_edit.text().strip() or "segment"
-        self._set_status(
-            f"Segment '{label}': frames {f0}–{f1} "
-            f"({(f1 - f0) / self._fps:.2f} s)"
-        )
+        self._set_status(f"Segment '{label}': frames {f0}–{f1} ({(f1 - f0) / self._fps:.2f} s)")
 
     def _on_save_segment_csv(self) -> None:
         rng = self._roi_frame_range()
@@ -970,9 +946,7 @@ class AnalysisTab(QWidget):
         f0, f1 = rng
         label = self._roi_label_edit.text().strip() or "segment"
         default_name = f"angles_{label}_{f0}-{f1}.csv"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save segment CSV", default_name, "CSV (*.csv)"
-        )
+        path, _ = QFileDialog.getSaveFileName(self, "Save segment CSV", default_name, "CSV (*.csv)")
         if not path:
             return
         seg = self._angles[f0 : f1 + 1]
@@ -988,9 +962,7 @@ class AnalysisTab(QWidget):
     # =========================================================================
 
     def _on_browse_pose3d(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load pose3d.npz", "", "NumPy (*.npz)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Load pose3d.npz", "", "NumPy (*.npz)")
         if path:
             self.load_pose3d(path)
 
@@ -1065,9 +1037,7 @@ class AnalysisTab(QWidget):
                     _fmt(stats.nan_pct),
                 ]
             self._fill_table_row(self._full_table, k, cells)
-            self._set_row_enabled(
-                self._full_table, k, self._angle_checks[k].isChecked()
-            )
+            self._set_row_enabled(self._full_table, k, self._angle_checks[k].isChecked())
 
     def _refresh_asymmetry_tab(self) -> None:
         if self._angles is None:
@@ -1083,9 +1053,7 @@ class AnalysisTab(QWidget):
             else:
                 si_mean = compute_symmetry_index(l_stats.mean_deg, r_stats.mean_deg)
                 si_rom = compute_symmetry_index(l_stats.rom_deg, r_stats.rom_deg)
-                si_vel = compute_symmetry_index(
-                    l_stats.peak_vel_deg_s, r_stats.peak_vel_deg_s
-                )
+                si_vel = compute_symmetry_index(l_stats.peak_vel_deg_s, r_stats.peak_vel_deg_s)
                 cells = [_fmt(si_mean), _fmt(si_rom), _fmt(si_vel)]
             self._fill_table_row(self._asym_table, row_idx, cells)
 
@@ -1097,9 +1065,7 @@ class AnalysisTab(QWidget):
     def _fill_table_row(table: QTableWidget, row: int, cells: list[str]) -> None:
         for c, text in enumerate(cells):
             item = QTableWidgetItem(text)
-            item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
+            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, c, item)
 
     @staticmethod

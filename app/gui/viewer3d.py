@@ -130,15 +130,16 @@ class SkeletonViewer3D(QWidget):
         grid.setColor((80, 80, 80, 100))
         self._glview.addItem(grid)
 
-        # Axes helper (RGB = XYZ)
+        # Axes helper (RGB = XYZ); 0.6 m arms so the origin triad reads clearly
+        # against a person-scale skeleton.
         axes_pts = np.array(
             [
                 [0, 0, 0],
-                [0.3, 0, 0],
+                [0.6, 0, 0],
                 [0, 0, 0],
-                [0, 0.3, 0],
+                [0, 0.6, 0],
                 [0, 0, 0],
-                [0, 0, 0.3],
+                [0, 0, 0.6],
             ],
             dtype=np.float32,
         )
@@ -171,21 +172,17 @@ class SkeletonViewer3D(QWidget):
         legend.addWidget(QLabel("<span style='color:#ff4444;'>■ X lateral</span>"))
         legend.addWidget(QLabel("<span style='color:#44ff44;'>■ Y anterior</span>"))
         legend.addWidget(QLabel("<span style='color:#4488ff;'>■ Z vertical (up)</span>"))
-        legend.addWidget(
-            QLabel(
-                "<span style='color:#888;'>  Units: metres · Z-up right-handed · "
-                "origin: stereo baseline midpoint</span>"
-            )
-        )
+        self._origin_note = QLabel()
+        self._world_note: bool | None = None
+        self._set_origin_note(False)
+        legend.addWidget(self._origin_note)
         legend.addStretch()
         # Wrap in a label-row widget
         legend_widget = QWidget()
         legend_widget.setLayout(legend)
         layout.addWidget(legend_widget)
 
-    def set_data(
-        self, joints3d: np.ndarray, conf3d: np.ndarray, world_frame: bool = False
-    ) -> None:
+    def set_data(self, joints3d: np.ndarray, conf3d: np.ndarray, world_frame: bool = False) -> None:
         """
         Load a new skeleton sequence.
 
@@ -212,6 +209,7 @@ class SkeletonViewer3D(QWidget):
             j = joints3d
             joints3d = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
         joints3d = joints3d.astype(np.float32)
+        self._set_origin_note(world_frame)
 
         self._joints3d = joints3d
         self._conf3d = conf3d
@@ -224,6 +222,16 @@ class SkeletonViewer3D(QWidget):
         self._rebuild_items()
         self.show_frame(0)
         self._fit_camera_to_data()
+
+    def _set_origin_note(self, world: bool) -> None:
+        """Update the legend's origin description when the frame kind changes."""
+        if getattr(self, "_world_note", None) is world or not hasattr(self, "_origin_note"):
+            return
+        self._world_note = world
+        origin = "floor board centre (world frame)" if world else "left camera"
+        self._origin_note.setText(
+            f"<span style='color:#888;'>  Units: metres · Z-up right-handed · origin: {origin}</span>"
+        )
 
     def eventFilter(self, obj, event) -> bool:  # noqa: D401
         """Emit *clicked* on a no-drag left click and *double_clicked* on dbl-click.
@@ -258,12 +266,15 @@ class SkeletonViewer3D(QWidget):
                 # fall through (return False) so orbit release is handled too
         return super().eventFilter(obj, event)
 
-    def set_frame(self, joints: np.ndarray, conf: np.ndarray) -> None:
+    def set_frame(self, joints: np.ndarray, conf: np.ndarray, world_frame: bool = False) -> None:
         """Live-update helper: render a single frame without a time loop.
 
         Args:
             joints: [P, 17, 3] float32 — current pose joints in metres
             conf:   [P, 17]    float32 — current confidence
+            world_frame: True when *joints* are ALREADY in the Z-up floor world
+                frame (a "Set coordinate system" board frame) — the OpenCV→Z-up
+                swap is then skipped, so the viewer origin IS the board centre.
         """
         if joints.ndim == 3:
             joints = joints[None]  # add T dim
@@ -273,14 +284,16 @@ class SkeletonViewer3D(QWidget):
         # items raise "Error while drawing item" for every such frame.  Replace
         # non-finite values with 0 so the canvas stays drawable.
         joints = np.nan_to_num(joints, nan=0.0, posinf=0.0, neginf=0.0)
-        # The triangulator returns points in the left-camera OpenCV frame
-        # (X right, Y DOWN, Z forward).  Convert to the viewer's Z-up world
-        # frame so the person appears standing upright:
-        #     viewer.X =  cv.X  (right / lateral)
-        #     viewer.Y =  cv.Z  (forward / anterior)
-        #     viewer.Z = -cv.Y  (up — flip the downward Y axis)
-        j = joints
-        joints = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
+        if not world_frame:
+            # The triangulator returns points in the left-camera OpenCV frame
+            # (X right, Y DOWN, Z forward).  Convert to the viewer's Z-up world
+            # frame so the person appears standing upright:
+            #     viewer.X =  cv.X  (right / lateral)
+            #     viewer.Y =  cv.Z  (forward / anterior)
+            #     viewer.Z = -cv.Y  (up — flip the downward Y axis)
+            j = joints
+            joints = np.stack([j[..., 0], j[..., 2], -j[..., 1]], axis=-1)
+        self._set_origin_note(world_frame)
         # Only rebuild GL items if the person count changed; otherwise just
         # update in-place — rebuilding allocates new line/scatter items per
         # call and is too expensive for live tracking at 5-10 Hz.
@@ -302,21 +315,31 @@ class SkeletonViewer3D(QWidget):
         person_depth: float = 2.0,
         person_height: float = 1.0,
         camera_height_above_floor: float = 1.5,
+        world_frame: bool = False,
     ) -> None:
         """Frame the viewer for typical live-tracking volume.
 
-        Enables OpenCV-camera → Z-up world axis swap inside set_frame() (so
-        the skeleton stands upright), zooms to the volume where a standing
-        person at *person_depth* metres in front of the left camera would
-        appear, and drops a translucent floor grid for orientation.
+        Zooms to the volume where a standing person typically appears and drops
+        a translucent floor grid for orientation.
+
+        Camera-frame mode (default): joints arrive in left-camera coords and
+        set_frame() applies the OpenCV→Z-up swap; the viewer origin is the
+        camera, so the floor sits at -camera_height_above_floor and the subject
+        ~person_depth metres out.
+
+        World-frame mode (``world_frame=True``, "Set coordinate system" active):
+        joints are already floor-anchored — the origin IS the board on the
+        floor, so the floor grid lies at Z = 0 and the subject stands at/near
+        the origin.
 
         Args:
             person_depth:  expected metres from the left camera to the subject's
-                            torso (along the camera's optical axis).
+                            torso (camera-frame mode only).
             person_height: subject's expected vertical centre (~0.5–1.0 m above
                             the floor, for a standing-pose midpoint).
             camera_height_above_floor: where the left camera sits above the
-                            floor — used to place the floor grid in the viewer.
+                            floor (camera-frame mode only).
+            world_frame:   True when live frames are in the floor world frame.
         """
         self._live_mode = True
         if self._gl is None:
@@ -329,15 +352,20 @@ class SkeletonViewer3D(QWidget):
             except Exception:
                 pass
             self._live_floor_item = None
-        # Floor grid in viewer coords (Z up).  Camera is at viewer-Z = 0;
-        # the floor is therefore at viewer-Z = -camera_height_above_floor.
         floor = gl.GLGridItem()
         floor.setSize(x=6, y=6, z=1)
         floor.setSpacing(x=0.5, y=0.5, z=0.5)
         floor.setColor((120, 120, 120, 140))
-        floor.translate(0.0, person_depth, -camera_height_above_floor)
+        if world_frame:
+            target = (0.0, 0.0, person_height)  # subject stands at the origin
+            # floor grid stays at Z = 0 — the world origin is ON the floor
+        else:
+            target = (0.0, person_depth, person_height - camera_height_above_floor)
+            # Camera is at viewer-Z = 0 → floor at -camera_height_above_floor.
+            floor.translate(0.0, person_depth, -camera_height_above_floor)
         self._glview.addItem(floor)
         self._live_floor_item = floor
+        self._set_origin_note(world_frame)
 
         # Aim the camera at the person's expected position and pull back
         # enough to see ~2 m vertical and ~2 m lateral comfortably.
@@ -345,7 +373,7 @@ class SkeletonViewer3D(QWidget):
             from pyqtgraph import Vector
 
             self._glview.setCameraPosition(
-                pos=Vector(0.0, person_depth, person_height - camera_height_above_floor),
+                pos=Vector(*target),
                 distance=4.0,
                 elevation=10,
                 azimuth=-60,

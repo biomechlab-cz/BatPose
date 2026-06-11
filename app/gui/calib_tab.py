@@ -152,14 +152,14 @@ class CalibTab(QWidget):
         self._sq_y.setValue(7)
         self._sq_size = QDoubleSpinBox()
         self._sq_size.setRange(0.001, 1.0)
+        self._sq_size.setDecimals(4)  # before setValue → no rounding to 2 dp
         self._sq_size.setValue(0.04)
         self._sq_size.setSuffix(" m")
-        self._sq_size.setDecimals(4)
         self._mk_size = QDoubleSpinBox()
         self._mk_size.setRange(0.001, 1.0)
+        self._mk_size.setDecimals(4)  # before setValue → keeps 0.024 (not 0.02)
         self._mk_size.setValue(0.024)
         self._mk_size.setSuffix(" m")
-        self._mk_size.setDecimals(4)
         self._aruco_dict = QComboBox()
         self._aruco_dict.addItems(["DICT_4X4_50", "DICT_4X4_100", "DICT_5X5_50", "DICT_6X6_250"])
         self._aruco_dict.setCurrentText("DICT_6X6_250")
@@ -181,9 +181,9 @@ class CalibTab(QWidget):
         self._chess_rows.setValue(6)
         self._chess_sq_size = QDoubleSpinBox()
         self._chess_sq_size.setRange(0.001, 1.0)
+        self._chess_sq_size.setDecimals(4)  # before setValue → keeps 0.025
         self._chess_sq_size.setValue(0.025)
         self._chess_sq_size.setSuffix(" m")
-        self._chess_sq_size.setDecimals(4)
         self._chess_cols.setToolTip(
             "Number of inner (non-border) corner columns.\n"
             "A 9-column printed board has 8 inner corners."

@@ -108,8 +108,8 @@ class _Fullscreen3DSkeleton(QDialog):
 
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self.close)
 
-    def set_frame(self, joints: np.ndarray, conf: np.ndarray) -> None:
-        self.viewer.set_frame(joints, conf)
+    def set_frame(self, joints: np.ndarray, conf: np.ndarray, world_frame: bool = False) -> None:
+        self.viewer.set_frame(joints, conf, world_frame=world_frame)
 
 
 class _FullscreenPreview(QDialog):
@@ -153,20 +153,20 @@ class _FullscreenPreview(QDialog):
         """Update the preview to a fresh BGR frame, scaled to the dialog size."""
         if bgr is None:
             return
-        rgb = QImage(
-            bgr[:, :, ::-1].tobytes(),
-            bgr.shape[1],
-            bgr.shape[0],
-            bgr.shape[1] * 3,
-            QImage.Format.Format_RGB888,
-        )
-        pix = QPixmap.fromImage(rgb)
+        # Format_BGR888 consumes OpenCV's native byte order directly — no
+        # per-frame channel-swap copy (bgr[:, :, ::-1] is strided + materialised).
+        h, w = bgr.shape[:2]
+        img = QImage(bgr.tobytes(), w, h, w * 3, QImage.Format.Format_BGR888)
+        pix = QPixmap.fromImage(img)
         target = self._label.size()
         if target.width() > 0 and target.height() > 0:
+            # Fast (nearest) up-scale: smooth bilinear to fullscreen every frame
+            # was the dominant cost here, and for a focus check nearest preserves
+            # the true pixels (smoothing only blurs sharpness away).
             pix = pix.scaled(
                 target,
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
         self._label.setPixmap(pix)
 
@@ -239,6 +239,20 @@ class CaptureTab(QWidget):
     _CALIB_MAX_PER_CELL = 3  # max captures whose board centroid falls in one cell
     _CALIB_MIN_COV = 0.04  # board must cover ≥ 4 % of image area
 
+    # Live-pose triangulation health: median reprojection error above this (px)
+    # means the stereo calibration can't place this working volume — the 2D pose
+    # is fine but the 3D joints get rejected ("dots, no skeleton").  ~15-20 px is
+    # the geometry-limited floor on a high-vergence rig (ADR-006); 40 px is well
+    # past anything a usable calibration produces.
+    _POSE_REPROJ_WARN_PX = 40.0
+
+    # "Set coordinate system" votes the board pose over this many live frames.
+    # Single-view planar PnP flips the recovered normal ~110° on ~10 % of frames
+    # with NO reprojection-error signature (measured on hardware — the flips are
+    # sporadic, max 2 consecutive), so a majority vote over a short burst removes
+    # them where a single-frame estimate would silently store a garbage frame.
+    _COORDSYS_FRAMES = 12
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._worker: CaptureWorker | None = None
@@ -289,6 +303,24 @@ class CaptureTab(QWidget):
         # gates the "Set coordinate system" button and is the file patched with
         # the floor world frame.
         self._calib_saved_path: str | None = None
+        # Projected world-frame axis triad [(px_left[4,2], px_right[4,2])] or None.
+        # The board (hence the world frame) is fixed relative to the stationary
+        # cameras, so the projected pixels are constant — compute once, redraw the
+        # triad on every live preview frame (a one-shot draw is overwritten by the
+        # next incoming frame).  Set whenever a calibration with a world_frame is
+        # loaded or "Set coordinate system" succeeds.
+        self._world_axes_px: tuple[np.ndarray, np.ndarray] | None = None
+        # "Set coordinate system" async state: while collecting, a list of
+        # (frame_left, frame_right) copies fed by _on_frame_ready; the pooled
+        # vote job runs off the GUI thread and is polled by a timer (frames may
+        # stop flowing — e.g. user stops the stream — so polling can't rely on
+        # frame ticks).
+        self._coordsys_pairs: list[tuple[np.ndarray, np.ndarray]] | None = None
+        self._coordsys_future: _Future | None = None
+        self._coordsys_ctx: dict | None = None  # calib + board numbers for the job
+        self._coordsys_poll = QTimer(self)
+        self._coordsys_poll.setInterval(100)
+        self._coordsys_poll.timeout.connect(self._poll_coordsys)
         # The outer pool only ever has one in-flight orchestration task at a time;
         # max_workers=1 is fine here.  The actual left/right parallelism happens
         # inside _detect_pair via _detect_lr_pool below.
@@ -325,8 +357,14 @@ class CaptureTab(QWidget):
         self._pose_last_kp_r: np.ndarray | None = None
         self._pose_last_conf_l: np.ndarray | None = None  # [P, 17]
         self._pose_last_conf_r: np.ndarray | None = None
-        self._pose_last_3d: np.ndarray | None = None  # [P, 17, 3]
+        self._pose_last_3d: np.ndarray | None = None  # [P, 17, 3] CAMERA frame
         self._pose_last_conf_3d: np.ndarray | None = None
+        # Display copy of the last 3D in the floor world frame (when the
+        # calibration defines one) — _pose_last_3d must stay camera-frame
+        # because the smoothing hold-last fallback feeds back into the
+        # camera-frame stream.
+        self._pose_last_view_3d: np.ndarray | None = None
+        self._pose_world: bool = False  # live joints shown in the world frame?
         # Track outcome of last 20 detection cycles: 'both' / 'left' / 'right' / 'none'.
         # Used to render the stability indicator under the L/R status labels.
         self._detect_history: deque = deque(maxlen=20)
@@ -373,6 +411,10 @@ class CaptureTab(QWidget):
         self._detect_pool.shutdown(wait=False)
         CaptureTab._detect_lr_pool.shutdown(wait=False)
         self._pool_shutdown = True
+        # Drop any in-flight "Set coordinate system" work.
+        self._coordsys_poll.stop()
+        self._coordsys_pairs = None
+        self._coordsys_future = None
 
     def set_project_dir(self, path: str) -> None:
         self._project_dir = path
@@ -798,24 +840,25 @@ class CaptureTab(QWidget):
         cf.setSpacing(3)
         self._calib_sq_x = QSpinBox()
         self._calib_sq_x.setRange(3, 20)
-        self._calib_sq_x.setValue(7)
+        self._calib_sq_x.setValue(5)
         self._calib_sq_y = QSpinBox()
         self._calib_sq_y.setRange(3, 20)
-        self._calib_sq_y.setValue(5)
+        self._calib_sq_y.setValue(7)
         self._calib_sq_size = QDoubleSpinBox()
         self._calib_sq_size.setRange(0.001, 1.0)
+        self._calib_sq_size.setDecimals(4)  # before setValue → no rounding to 2 dp
         self._calib_sq_size.setValue(0.04)
         self._calib_sq_size.setSuffix(" m")
-        self._calib_sq_size.setDecimals(4)
         self._calib_mk_size = QDoubleSpinBox()
         self._calib_mk_size.setRange(0.001, 1.0)
-        self._calib_mk_size.setValue(0.03)
+        self._calib_mk_size.setDecimals(4)  # before setValue → keeps 0.024 (not 0.02)
+        self._calib_mk_size.setValue(0.024)
         self._calib_mk_size.setSuffix(" m")
-        self._calib_mk_size.setDecimals(4)
         self._calib_aruco_dict = QComboBox()
         self._calib_aruco_dict.addItems(
             ["DICT_4X4_50", "DICT_4X4_100", "DICT_5X5_50", "DICT_6X6_250"]
         )
+        self._calib_aruco_dict.setCurrentText("DICT_6X6_250")
         cf.addRow("Squares X:", self._calib_sq_x)
         cf.addRow("Squares Y:", self._calib_sq_y)
         cf.addRow("Square size:", self._calib_sq_size)
@@ -837,9 +880,9 @@ class CaptureTab(QWidget):
         self._calib_chess_rows.setToolTip("Inner corner rows (total squares − 1)")
         self._calib_chess_sq_size = QDoubleSpinBox()
         self._calib_chess_sq_size.setRange(0.001, 1.0)
+        self._calib_chess_sq_size.setDecimals(4)  # before setValue → keeps 0.025
         self._calib_chess_sq_size.setValue(0.025)
         self._calib_chess_sq_size.setSuffix(" m")
-        self._calib_chess_sq_size.setDecimals(4)
         chf.addRow("Cols (inner):", self._calib_chess_cols)
         chf.addRow("Rows (inner):", self._calib_chess_rows)
         chf.addRow("Square size:", self._calib_chess_sq_size)
@@ -878,6 +921,7 @@ class CaptureTab(QWidget):
             "Fisheye — OpenCV fisheye model (θ-based), use for > 150° FOV.\n\n"
             "If RMS > 1.5 px your lens is probably wider than the selected model allows."
         )
+        self._calib_lens_combo.setCurrentIndex(2)  # default Fisheye (the deployed rig)
         lens_row.addWidget(self._calib_lens_combo)
         board_v.addLayout(lens_row)
 
@@ -1394,6 +1438,10 @@ class CaptureTab(QWidget):
     def _on_frame_ready(self, frame) -> None:
         self._last_frame = frame
 
+        # Feed a pending "Set coordinate system" collection (mode-independent;
+        # no-op unless the button was just clicked).
+        self._coordsys_feed(frame.frame_left, frame.frame_right)
+
         drops = frame.dropped_frames
         if drops > 0:
             color = "#e74c3c" if self._is_recording else "#e67e22"
@@ -1448,14 +1496,11 @@ class CaptureTab(QWidget):
                     self._pool_shutdown = True
 
             # Display with overlay using last known detection result
-            _set_preview(
-                self._preview_left,
-                CaptureTab._draw_overlay(frame.frame_left, self._det_left, "L"),
-            )
-            _set_preview(
-                self._preview_right,
-                CaptureTab._draw_overlay(frame.frame_right, self._det_right, "R"),
-            )
+            left = CaptureTab._draw_overlay(frame.frame_left, self._det_left, "L")
+            right = CaptureTab._draw_overlay(frame.frame_right, self._det_right, "R")
+            left, right = self._maybe_overlay_world_axes(left, right)
+            _set_preview(self._preview_left, left)
+            _set_preview(self._preview_right, right)
         elif self._pose_active:
             # ── Live Pose Tracking branch ─────────────────────────────────
             # Collect any completed detection.
@@ -1509,16 +1554,19 @@ class CaptureTab(QWidget):
                 )
             else:
                 left, right = frame.frame_left, frame.frame_right
+            left, right = self._maybe_overlay_world_axes(left, right)
             _set_preview(self._preview_left, left)
             _set_preview(self._preview_right, right)
         else:
-            _set_preview(self._preview_left, frame.frame_left)
-            _set_preview(self._preview_right, frame.frame_right)
+            left, right = self._maybe_overlay_world_axes(frame.frame_left, frame.frame_right)
+            _set_preview(self._preview_left, left)
+            _set_preview(self._preview_right, right)
 
-        # Push the latest frame into the fullscreen inspect window if open.
+        # Push the latest frame into the fullscreen inspect window if open,
+        # with the world-frame triad overlaid (matches the inline previews).
         if self._fs_preview is not None and self._fs_side is not None:
             src = frame.frame_left if self._fs_side == "L" else frame.frame_right
-            self._fs_preview.set_frame(src)
+            self._fs_preview.set_frame(self._overlay_world_axes_side(src, self._fs_side))
 
         self._update_sync_indicator(frame)
 
@@ -1540,7 +1588,7 @@ class CaptureTab(QWidget):
         if self._last_frame is not None:
             src = self._last_frame.frame_left if side == "L" else self._last_frame.frame_right
             dlg.showFullScreen()
-            dlg.set_frame(src)
+            dlg.set_frame(self._overlay_world_axes_side(src, side))
         else:
             dlg.showFullScreen()
 
@@ -1571,9 +1619,11 @@ class CaptureTab(QWidget):
         def _configure(d=dlg):
             if self._fs_3d is not d:
                 return  # closed again before the tick fired
-            d.viewer.setup_live_view()
-            if self._pose_last_3d is not None and self._pose_last_conf_3d is not None:
-                d.set_frame(self._pose_last_3d, self._pose_last_conf_3d)
+            d.viewer.setup_live_view(world_frame=self._pose_world)
+            if self._pose_last_view_3d is not None and self._pose_last_conf_3d is not None:
+                d.set_frame(
+                    self._pose_last_view_3d, self._pose_last_conf_3d, world_frame=self._pose_world
+                )
 
         QTimer.singleShot(0, _configure)
 
@@ -1658,6 +1708,14 @@ class CaptureTab(QWidget):
         self._detect_future = None
         self._detect_submitted_fl = None
         self._detect_submitted_fr = None
+        # Frames stopped flowing mid "Set coordinate system" collection — cancel
+        # it (an already-submitted job keeps running and completes via the poll).
+        if self._coordsys_pairs is not None:
+            self._coordsys_pairs = None
+            self._set_coord_btn.setEnabled(True)
+            self._calib_status_label.setText(
+                "Stream stopped before the floor board could be analysed."
+            )
         self._detect_frame_fl = None
         self._detect_frame_fr = None
         # Also disable Live Pose mode — no stream means no input.
@@ -1770,6 +1828,8 @@ class CaptureTab(QWidget):
         if existing and Path(existing).is_file():
             self._calib_saved_path = existing
             self._set_coord_btn.setEnabled(True)
+            # Show the floor triad immediately if this calib already has a world frame.
+            self._refresh_world_axes_overlay()
 
         # Suggest dropping to the calibration-optimal fps if the live stream is
         # running faster (board detection can't keep up → dropped frames).
@@ -1901,13 +1961,18 @@ class CaptureTab(QWidget):
         self._pose_last_conf_r = None
         self._pose_last_3d = None
         self._pose_last_conf_3d = None
+        self._pose_last_view_3d = None
+        # When the calibration defines a floor world frame, live joints are
+        # re-expressed in it (ADR-010) — the viewer origin is then the board on
+        # the floor (subject stands at/near it), not the camera.
+        self._pose_world = self._pose_calib.get("world_frame") is not None
 
         self._pose_active = True
         # Reveal the inline 3D viewer next to the camera previews and frame
         # it on the volume where a standing person typically appears (~2 m
         # in front of left camera).  User can still orbit / zoom with the mouse.
         self._preview_3d.setVisible(True)
-        self._preview_3d.setup_live_view()
+        self._preview_3d.setup_live_view(world_frame=self._pose_world)
         self._pose_status_label.setText("Tracking — waiting for first frame…")
 
     def _stop_pose_tracking(self) -> None:
@@ -1995,7 +2060,9 @@ class CaptureTab(QWidget):
         if self._pose_smooth_check.isChecked():
             joints3d = self._apply_pose_smoothing(joints3d, conf3d)
 
-        # Stash for overlay/repaint between detections.
+        # Stash for overlay/repaint between detections.  _pose_last_3d stays in
+        # the CAMERA frame — the smoothing hold-last fallback feeds it back into
+        # the camera-frame stream.
         self._pose_last_kp_l = kps_l
         self._pose_last_kp_r = kps_r
         self._pose_last_conf_l = conf_l
@@ -2003,22 +2070,51 @@ class CaptureTab(QWidget):
         self._pose_last_3d = joints3d
         self._pose_last_conf_3d = conf3d
 
+        # Express the DISPLAY copy in the floor world frame when the calibration
+        # defines one — mirrors the offline pipeline, where the world transform
+        # is the LAST step (after smoothing).  The viewer then skips its legacy
+        # OpenCV→Z-up swap and its origin IS the board on the floor.
+        wf = calib.get("world_frame")
+        self._pose_world = wf is not None
+        view3d = joints3d
+        if wf is not None:
+            from app.calib.coordinate_system import apply_world_frame  # noqa: PLC0415
+
+            view3d = apply_world_frame(joints3d, wf).astype(np.float32)
+        self._pose_last_view_3d = view3d
+
         # Push to the inline 3D viewer (next to the camera previews) and to
         # the fullscreen pop-out if it's currently open.
-        self._preview_3d.set_frame(joints3d, conf3d)
+        self._preview_3d.set_frame(view3d, conf3d, world_frame=self._pose_world)
         if self._fs_3d is not None:
-            self._fs_3d.set_frame(joints3d, conf3d)
+            self._fs_3d.set_frame(view3d, conf3d, world_frame=self._pose_world)
 
         # Metrics readout.
         n_valid = int((conf3d > 0).sum())
         n_total = conf3d.size
-        mean_err = (
-            float(np.mean(repro[np.isfinite(repro)])) if np.isfinite(repro).any() else float("nan")
-        )
-        self._pose_status_label.setText(
-            f"<span style='color:#2ecc71'>● Tracking</span> "
-            f"<span style='color:#aaa'>· persons {P} · joints {n_valid}/{n_total} valid</span>"
-        )
+        finite = repro[np.isfinite(repro)]
+        mean_err = float(np.mean(finite)) if finite.size else float("nan")
+        med_err = float(np.median(finite)) if finite.size else float("nan")
+
+        # A person IS detected in 2D, but if the triangulation reprojects far off
+        # the joints get rejected (conf3d=0) → "dots but no skeleton".  That's a
+        # stereo-calibration problem, not a detection one — surface it loudly
+        # instead of silently showing an empty 3D viewer.
+        calib_bad = (np.isfinite(med_err) and med_err > self._POSE_REPROJ_WARN_PX) or n_valid == 0
+        if calib_bad:
+            self._pose_status_label.setText(
+                f"<span style='color:#e74c3c'>⚠ Pose detected, but 3D triangulation is failing</span> "
+                f"<span style='color:#aaa'>· joints {n_valid}/{n_total} valid · "
+                f"median reproj {med_err:.0f} px</span><br>"
+                f"<span style='color:#e67e22'>The stereo calibration looks unreliable for this "
+                f"volume (good is &lt; 20 px). Re-run Calibration — widen the camera baseline / "
+                f"reduce toe-in and cover more of the view with the board.</span>"
+            )
+        else:
+            self._pose_status_label.setText(
+                f"<span style='color:#2ecc71'>● Tracking</span> "
+                f"<span style='color:#aaa'>· persons {P} · joints {n_valid}/{n_total} valid</span>"
+            )
         self._pose_metrics_label.setText(
             f"mean reproj err: {mean_err:.2f} px" if np.isfinite(mean_err) else "mean reproj err: —"
         )
@@ -2605,6 +2701,8 @@ class CaptureTab(QWidget):
         # Calibration exists now → the floor coordinate system can be defined.
         self._calib_saved_path = out_path
         self._set_coord_btn.setEnabled(True)
+        # A freshly-run calibration has no world frame yet → clears any stale triad.
+        self._refresh_world_axes_overlay()
 
         self.calibration_saved.emit(out_path)
 
@@ -2622,15 +2720,31 @@ class CaptureTab(QWidget):
     def _on_set_coordinate_system(self) -> None:
         """Define the world frame from a board lying flat on the floor.
 
-        Detects the board in the current live frame from both cameras,
-        triangulates its corners, builds a board-centred world frame
-        (X=long side, Y=short side, Z=up), stores it in calibration.yml, and
-        draws the axis triad on both preview panels.
+        Collects ~`_COORDSYS_FRAMES` live frames, then a pooled background job
+        (no GUI freeze — a single failed full-res chessboard search costs
+        ~450 ms) tries two detection strategies:
+          1. **ChArUco stereo** — when the markers decode (board reasonably
+             close): corners are triangulated and a board-centred frame is fit.
+             Corner IDs anchor the orientation, so one frame suffices.
+          2. **Chessboard monocular** — for a board far across the floor where
+             the ArUco markers are too small to decode, the plain checker
+             corners are still found; the pose is recovered by solvePnP from
+             whichever camera sees the board (left preferred; if only the right
+             sees it, its pose is transformed into camera-1 coords via the
+             stereo extrinsics).  The pose is computed on EVERY collected frame
+             and **majority-voted** — single-view planar PnP sporadically flips
+             the normal ~110° with no reprojection-error signature.
+        The frame (origin = board centre, X = long side, Y = short side, Z = up)
+        is stored in calibration.yml and the axis triad is drawn on both previews.
         """
         from pathlib import Path as _Path
 
+        if self._coordsys_pairs is not None or self._coordsys_future is not None:
+            return  # a click is already being processed
         if self._last_frame is None:
-            QMessageBox.warning(self, "No frame", "Start the cameras first — no live frame to analyse.")
+            QMessageBox.warning(
+                self, "No frame", "Start the cameras first — no live frame to analyse."
+            )
             return
         if not self._calib_saved_path or not _Path(self._calib_saved_path).is_file():
             QMessageBox.warning(self, "Not calibrated", "Run or load a calibration first.")
@@ -2645,84 +2759,362 @@ class CaptureTab(QWidget):
                 QMessageBox.warning(self, "Board config error", str(exc))
                 return
 
-        fl, fr = self._last_frame.frame_left, self._last_frame.frame_right
-        try:
-            det_l, det_r = CaptureTab._detect_pair(self._detector, fl, fr)
-        except Exception as exc:
-            QMessageBox.warning(self, "Detection error", str(exc))
-            return
-
-        def _ok(d) -> bool:
-            return d is not None and not getattr(d, "partial", False) and len(d.img_pts) > 0
-
-        if not (_ok(det_l) and _ok(det_r)):
-            QMessageBox.warning(
-                self,
-                "Board not detected",
-                "The board must be fully visible to BOTH cameras.\n\n"
-                "Lay it flat on the floor where both cameras see it clearly, then "
-                "try again.",
-            )
-            return
-
-        from app.calib.coordinate_system import axis_endpoints_cam1, compute_world_frame
-        from app.calib.stereo import load_calibration, update_world_frame
+        from app.calib.coordinate_system import board_squares
+        from app.calib.stereo import load_calibration
 
         calib = load_calibration(self._calib_saved_path)
-        try:
-            wf = compute_world_frame(det_l, det_r, calib)
-        except Exception as exc:
-            QMessageBox.warning(self, "Coordinate system", f"Could not compute world frame:\n{exc}")
+        board = calib.get("board_cfg") or self._live_board_cfg()
+        # board_squares maps BOTH cfg conventions (charuco squares_x/squares_y,
+        # plain-checkerboard cols/rows) — reading squares_x directly yielded 0
+        # for checkerboard calibrations and silently disabled the chessboard
+        # detection strategy.
+        sx, sy, ss = board_squares(board)
+        self._coordsys_ctx = {
+            "calib": calib,
+            "sx": sx,
+            "sy": sy,
+            "ss": ss,
+            "fisheye": calib.get("lens_model", "standard") == "fisheye",
+        }
+        self._set_coord_btn.setEnabled(False)
+
+        if self._worker is not None:
+            # Stream running → collect a short burst; _on_frame_ready feeds the
+            # frames and the job is submitted once enough are gathered.
+            self._coordsys_pairs = []
+            self._calib_status_label.setText(
+                f"Analysing the floor board over the next {self._COORDSYS_FRAMES} frames…"
+            )
+        else:
+            # No live stream → single (last) frame through the same pipeline.
+            fl, fr = self._last_frame.frame_left, self._last_frame.frame_right
+            self._calib_status_label.setText("Analysing the floor board…")
+            self._submit_coordsys_job([(fl.copy(), fr.copy())])
+
+    def _coordsys_feed(self, fl: np.ndarray, fr: np.ndarray) -> None:
+        """Accumulate live frames for a pending 'Set coordinate system' click."""
+        if self._coordsys_pairs is None:
             return
+        self._coordsys_pairs.append((fl.copy(), fr.copy()))
+        if len(self._coordsys_pairs) >= self._COORDSYS_FRAMES:
+            pairs, self._coordsys_pairs = self._coordsys_pairs, None
+            self._submit_coordsys_job(pairs)
+
+    def _submit_coordsys_job(self, pairs: list[tuple[np.ndarray, np.ndarray]]) -> None:
+        ctx = self._coordsys_ctx or {}
+        try:
+            self._coordsys_future = self._detect_pool.submit(
+                CaptureTab._coordsys_job,
+                self._detector,
+                pairs,
+                ctx.get("calib"),
+                ctx.get("sx", 0),
+                ctx.get("sy", 0),
+                ctx.get("ss", 0.0),
+                ctx.get("fisheye", False),
+            )
+        except RuntimeError:  # pool already shut down (app closing)
+            self._pool_shutdown = True
+            self._coordsys_future = None
+            self._set_coord_btn.setEnabled(True)
+            return
+        self._coordsys_poll.start()
+
+    def _poll_coordsys(self) -> None:
+        fut = self._coordsys_future
+        if fut is None:
+            self._coordsys_poll.stop()
+            return
+        if not fut.done():
+            return
+        self._coordsys_poll.stop()
+        self._coordsys_future = None
+        try:
+            res = fut.result()
+        except Exception as exc:  # job crashed — report, don't swallow
+            res = {"wf": None, "detail": "", "nodetect": False, "error": str(exc)}
+        self._on_coordsys_done(res)
+
+    @staticmethod
+    def _coordsys_job(
+        detector,
+        pairs: list[tuple[np.ndarray, np.ndarray]],
+        calib: dict,
+        sx: int,
+        sy: int,
+        ss: float,
+        fisheye: bool,
+    ) -> dict:
+        """Pooled compute for 'Set coordinate system' (no Qt — runs off-thread).
+
+        Returns {"wf": dict|None, "detail": str, "nodetect": bool, "error": str|None}.
+        """
+        from app.calib.coordinate_system import (
+            compute_world_frame,
+            compute_world_frame_monocular,
+            detect_chessboard_corners,
+            vote_world_frames,
+        )
+
+        def _ok(d) -> bool:
+            return d is not None and not getattr(d, "partial", False) and len(d.img_pts) >= 6
+
+        # Strategy 1 — ChArUco stereo on the first pair (IDs anchor orientation,
+        # stereo Kabsch has no planar ambiguity → one frame suffices).
+        if detector is not None:
+            try:
+                det_l, det_r = CaptureTab._detect_pair(detector, pairs[0][0], pairs[0][1])
+                if _ok(det_l) and _ok(det_r):
+                    wf = compute_world_frame(det_l, det_r, calib)
+                    detail = (
+                        f"ChArUco stereo — fit RMS {wf['fit_rms_m'] * 1000:.1f} mm "
+                        f"over {wf['n_corners']} corners"
+                    )
+                    return {"wf": wf, "detail": detail, "nodetect": False, "error": None}
+            except Exception:
+                pass  # fall through to chessboard
+
+        if not (sx >= 2 and sy >= 2 and ss > 0):
+            return {"wf": None, "detail": "", "nodetect": True, "error": None}
+
+        # Strategy 2 — chessboard.  Decide which camera sees the board from the
+        # first few pairs (left preferred — it IS the reference frame), then run
+        # monocular solvePnP on every frame and majority-vote the pose.
+        side = None
+        for fl, fr in pairs[:3]:
+            if detect_chessboard_corners(cv2.cvtColor(fl, cv2.COLOR_BGR2GRAY), sx, sy) is not None:
+                side = "left"
+                break
+            if detect_chessboard_corners(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), sx, sy) is not None:
+                side = "right"
+                break
+        if side is None:
+            return {"wf": None, "detail": "", "nodetect": True, "error": None}
+
+        cands = []
+        for fl, fr in pairs:
+            gray = cv2.cvtColor(fl if side == "left" else fr, cv2.COLOR_BGR2GRAY)
+            ip = detect_chessboard_corners(gray, sx, sy)
+            if ip is None:
+                continue
+            try:
+                if side == "left":
+                    cands.append(
+                        compute_world_frame_monocular(
+                            ip, calib["K1"], calib["D1"], sx, sy, ss, fisheye
+                        )
+                    )
+                else:
+                    cands.append(
+                        compute_world_frame_monocular(
+                            ip,
+                            calib["K2"],
+                            calib["D2"],
+                            sx,
+                            sy,
+                            ss,
+                            fisheye,
+                            cam_to_ref=(calib["R"], calib["T"]),
+                        )
+                    )
+            except ValueError:
+                continue  # bad frame (e.g. partial detection) — skip
+        if not cands:
+            return {"wf": None, "detail": "", "nodetect": True, "error": None}
+
+        try:
+            wf = vote_world_frames(cands)
+        except ValueError as exc:
+            return {"wf": None, "detail": "", "nodetect": False, "error": str(exc)}
+        detail = (
+            f"chessboard ({side} camera) — {wf['n_agree']}/{wf['n_votes']} frames agree, "
+            f"reproj RMS {wf['fit_rms_px']:.1f} px"
+            if "fit_rms_px" in wf
+            else f"chessboard ({side} camera) — {wf['n_agree']}/{wf['n_votes']} frames agree"
+        )
+        return {"wf": wf, "detail": detail, "nodetect": False, "error": None}
+
+    def _on_coordsys_done(self, res: dict) -> None:
+        """Apply the result of a 'Set coordinate system' job (GUI thread)."""
+        from pathlib import Path as _Path
+
+        from app.calib.stereo import update_world_frame
+
+        self._set_coord_btn.setEnabled(True)
+        wf = res.get("wf")
+        if wf is None:
+            self._calib_status_label.setText("")
+            if res.get("error"):
+                QMessageBox.warning(
+                    self, "Coordinate system", f"Pose estimation failed:\n{res['error']}"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Board not detected",
+                    "Could not find the calibration board in EITHER camera.\n\n"
+                    "• Lay it flat on the floor where at least one camera sees the whole "
+                    "board clearly (it need not be both).\n"
+                    "• If it's far away, the ArUco markers can't be decoded — the plain "
+                    "checker pattern is used instead, so keep the whole board visible "
+                    "and unblurred.\n"
+                    "• A larger board, or moving it a little closer, helps.",
+                )
+            return
+        if not self._calib_saved_path:
+            return  # calibration vanished mid-flight — nothing to patch
 
         update_world_frame(self._calib_saved_path, wf)
 
-        # Draw the axis triad on both previews (X red, Y green, Z blue).
+        # Draw the axis triad on both previews (X red, Y green, Z blue); the
+        # cached pixels keep it on every subsequent live frame.
+        calib = (self._coordsys_ctx or {}).get("calib") or {}
         try:
-            self._draw_world_axes(wf, calib, fl, fr)
+            if self._last_frame is not None:
+                self._draw_world_axes(
+                    wf, calib, self._last_frame.frame_left, self._last_frame.frame_right
+                )
+            else:
+                self._world_axes_px = CaptureTab._project_world_axes(wf, calib)
         except Exception:
             pass  # visualization is best-effort; the frame is already saved
 
         self._calib_status_label.setText(
             f"<b>✓ Coordinate system set</b> — origin at board centre; "
-            f"X={wf['board_long_m'] * 100:.0f} cm (long side), "
-            f"Y={wf['board_short_m'] * 100:.0f} cm (short side), Z up. "
-            f"Fit RMS {wf['fit_rms_m'] * 1000:.1f} mm over {wf['n_corners']} corners. "
-            f"Saved to {_Path(self._calib_saved_path).name}."
+            f"X = {wf['board_long_m'] * 100:.0f} cm (long side), "
+            f"Y = {wf['board_short_m'] * 100:.0f} cm (short side), Z up.<br>"
+            f"<span style='color:#888'>{res.get('detail', '')}. Saved to "
+            f"{_Path(self._calib_saved_path).name}.</span>"
         )
+
+        # If Live Pose is currently tracking off this same calibration file, pick
+        # the new frame up immediately: the very next pose frame is re-expressed
+        # in the floor world frame and the viewer floor/origin re-anchor to the
+        # board (no restart needed).
+        if self._pose_active and self._pose_calib is not None:
+            try:
+                same = (
+                    _Path(self._pose_calib_edit.text().strip()).resolve()
+                    == _Path(self._calib_saved_path).resolve()
+                )
+            except Exception:
+                same = False
+            if same:
+                self._pose_calib["world_frame"] = wf
+                self._pose_world = True
+                self._preview_3d.setup_live_view(world_frame=True)
+
         # Re-emit so the Reconstruction tab reloads the (now world-aware) calib.
         self.calibration_saved.emit(self._calib_saved_path)
 
-    def _draw_world_axes(self, world_frame: dict, calib: dict, fl: np.ndarray, fr: np.ndarray) -> None:
-        """Project the world-frame axis triad into both views and show it."""
+    @staticmethod
+    def _project_world_axes(world_frame: dict, calib: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Project the world-frame triad into both views → (px_left[4,2], px_right[4,2]).
+
+        The endpoints are fixed in camera-1 coords, so the result is constant for
+        a given (world_frame, calib) — compute once and reuse every frame.
+        """
         from app.calib.coordinate_system import axis_endpoints_cam1
         from app.recon3d.triangulate import project_points
 
         fisheye = calib.get("lens_model", "standard") == "fisheye"
         pts3d = axis_endpoints_cam1(world_frame)  # [4,3] in camera-1 coords
-
         # Left camera: points already in camera-1 frame (R=I, t=0).
         px_l = project_points(pts3d, calib["K1"], calib["D1"], np.eye(3), np.zeros(3), fisheye)
         # Right camera: transform camera-1 → camera-2 via the stereo extrinsics.
         px_r = project_points(
             pts3d, calib["K2"], calib["D2"], calib["R"], calib["T"].reshape(3), fisheye
         )
+        return px_l, px_r
 
+    def _refresh_world_axes_overlay(self) -> None:
+        """Load the current calibration's world frame (if any) and cache the
+        projected axis triad so it's drawn on every live preview frame.
+
+        Clears the overlay when there's no calibration or no world frame.
+        """
+        self._world_axes_px = None
+        path = self._calib_saved_path
+        if not path or not Path(path).is_file():
+            return
+        try:
+            from app.calib.stereo import load_calibration
+
+            calib = load_calibration(path)
+            wf = calib.get("world_frame")
+            if wf:
+                self._world_axes_px = CaptureTab._project_world_axes(wf, calib)
+        except Exception:
+            self._world_axes_px = None  # best-effort; never break the stream
+
+    def _maybe_overlay_world_axes(
+        self, left: np.ndarray, right: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Draw the cached world-frame triad onto preview copies, if set."""
+        if self._world_axes_px is None:
+            return left, right
+        px_l, px_r = self._world_axes_px
+        return (
+            CaptureTab._draw_axes(left.copy(), px_l),
+            CaptureTab._draw_axes(right.copy(), px_r),
+        )
+
+    def _overlay_world_axes_side(self, src: np.ndarray, side: str) -> np.ndarray:
+        """Return *src* with the world-frame triad for one camera ("L"/"R") drawn
+        on a copy, if a frame is set — used by the fullscreen inspect window so the
+        triad shows there too (e.g. while checking the coordinate system during
+        calibration)."""
+        if self._world_axes_px is None:
+            return src
+        px = self._world_axes_px[0] if side == "L" else self._world_axes_px[1]
+        return CaptureTab._draw_axes(src.copy(), px)
+
+    def _draw_world_axes(
+        self, world_frame: dict, calib: dict, fl: np.ndarray, fr: np.ndarray
+    ) -> None:
+        """Project the world-frame axis triad into both views and show it once
+        (instant feedback; subsequent frames redraw it from the cached pixels)."""
+        px_l, px_r = CaptureTab._project_world_axes(world_frame, calib)
+        self._world_axes_px = (px_l, px_r)
         _set_preview(self._preview_left, CaptureTab._draw_axes(fl.copy(), px_l))
         _set_preview(self._preview_right, CaptureTab._draw_axes(fr.copy(), px_r))
 
     @staticmethod
     def _draw_axes(bgr: np.ndarray, px: np.ndarray) -> np.ndarray:
-        """Draw the [origin, +X, +Y, +Z] triad given 4 projected pixel points."""
-        o = (int(round(px[0, 0])), int(round(px[0, 1])))
+        """Draw the [origin, +X, +Y, +Z] triad as thin, semi-transparent arrows.
+
+        Mutates *bgr* in place (every caller passes a private copy).  The alpha
+        blend is restricted to the triad's bounding box — blending the whole
+        1920×1200 frame every tick was a real cost, especially behind the
+        fullscreen up-scale.  Guards non-finite pixels (a point projected behind
+        the camera → inf/NaN) so it never raises inside the frame callback.
+        """
+        px = np.asarray(px, dtype=np.float64)
+        if not np.isfinite(px).all():
+            return bgr  # endpoint projects to infinity — skip the overlay this call
+        h, w = bgr.shape[:2]
+        m = 50  # margin for arrowheads, labels, line width
+        x0 = max(0, int(np.floor(px[:, 0].min())) - m)
+        y0 = max(0, int(np.floor(px[:, 1].min())) - m)
+        x1 = min(w, int(np.ceil(px[:, 0].max())) + m)
+        y1 = min(h, int(np.ceil(px[:, 1].max())) + m)
+        if x1 <= x0 or y1 <= y0:
+            return bgr  # triad entirely off-frame
+        roi = bgr[y0:y1, x0:x1]
+        # Draw on a copy of just the ROI, then alpha-blend it back: untouched
+        # pixels are identical so only the arrows/labels appear semi-transparent.
+        overlay = roi.copy()
+        o = (int(round(px[0, 0])) - x0, int(round(px[0, 1])) - y0)
         # BGR: X=red, Y=green, Z=blue (matches the 3D viewer legend).
         for i, (col, lab) in enumerate(
             [((0, 0, 255), "X"), ((0, 255, 0), "Y"), ((255, 0, 0), "Z")], start=1
         ):
-            p = (int(round(px[i, 0])), int(round(px[i, 1])))
-            cv2.line(bgr, o, p, col, 3, cv2.LINE_AA)
-            cv2.putText(bgr, lab, p, cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3, cv2.LINE_AA)
-        cv2.circle(bgr, o, 6, (255, 255, 255), -1, cv2.LINE_AA)
+            p = (int(round(px[i, 0])) - x0, int(round(px[i, 1])) - y0)
+            cv2.arrowedLine(overlay, o, p, col, 2, cv2.LINE_AA, tipLength=0.2)
+            cv2.putText(overlay, lab, p, cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 2, cv2.LINE_AA)
+        cv2.circle(overlay, o, 4, (255, 255, 255), -1, cv2.LINE_AA)
+        alpha = 0.7  # a bit transparent
+        roi[:] = cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0)
         return bgr
 
     # ------------------------------------------------------------------

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox, QStyle
+from PySide6.QtWidgets import QMessageBox
 
 from app.gui.recon_tab import ReconTab
 
@@ -34,12 +34,16 @@ def tab(qtbot):
     return widget
 
 
-def _make_pose3d_npz(tmp_path: Path, T: int = 60, fps: float = 30.0) -> str:
+def _make_pose3d_npz(
+    tmp_path: Path, T: int = 60, fps: float = 30.0, coordinate_frame: str | None = None
+) -> str:
     """Create a minimal synthetic pose3d.npz for playback tests."""
     rng = np.random.default_rng(0)
     joints3d = rng.uniform(-1.0, 1.0, (T, 1, 17, 3)).astype(np.float32)
     conf3d = np.ones((T, 1, 17), dtype=np.float32)
     meta = {"fps": fps, "model_name": "synthetic"}
+    if coordinate_frame is not None:
+        meta["coordinate_frame"] = coordinate_frame
     path = str(tmp_path / "pose3d.npz")
     np.savez(path, joints3d=joints3d, conf3d=conf3d, meta=np.array(meta))
     return path
@@ -188,7 +192,9 @@ class TestLoadLastRecording:
     """The 'Load Last Recording' button scans <project>/capture/ for the
     newest *_left.avi / *_right.avi pair (ADR-007 naming)."""
 
-    def _make_recording(self, capture_dir: Path, stamp: str, mtime: float | None = None) -> tuple[str, str]:
+    def _make_recording(
+        self, capture_dir: Path, stamp: str, mtime: float | None = None
+    ) -> tuple[str, str]:
         capture_dir.mkdir(parents=True, exist_ok=True)
         left = capture_dir / f"{stamp}_left.avi"
         right = capture_dir / f"{stamp}_right.avi"
@@ -196,6 +202,7 @@ class TestLoadLastRecording:
         right.write_bytes(b"fake-avi")
         if mtime is not None:
             import os
+
             os.utime(left, (mtime, mtime))
             os.utime(right, (mtime, mtime))
         return str(left), str(right)
@@ -227,6 +234,7 @@ class TestLoadLastRecording:
         orphan = cap / "20260103_140000_left.avi"
         orphan.write_bytes(b"fake")
         import os
+
         os.utime(orphan, (3_000_000, 3_000_000))
         good_l, good_r = self._make_recording(cap, "20260101_120000", mtime=1_000_000)
         tab.set_project_dir(str(tmp_path))
@@ -301,6 +309,170 @@ class TestOutputNaming:
         assert Path(tab._out_edit.text()).name == "chosen.npz"
 
 
+class TestCsvExportMetadata:
+    """The CSV export's sidecar metadata records the coordinate frame (ADR-010)."""
+
+    def _export(self, tab, tmp_path, monkeypatch, coordinate_frame):
+        import json
+
+        tab._pose3d_path = _make_pose3d_npz(tmp_path, T=3, coordinate_frame=coordinate_frame)
+        out = tmp_path / "export.csv"
+        monkeypatch.setattr(
+            "app.gui.recon_tab.QFileDialog.getSaveFileName",
+            lambda *a, **k: (str(out), "CSV (*.csv)"),
+        )
+        tab._on_export()
+        assert out.exists()
+        return json.loads((tmp_path / "export_metadata.json").read_text())
+
+    def test_world_frame_tag(self, tab, tmp_path, monkeypatch):
+        meta = self._export(tab, tmp_path, monkeypatch, "world")
+        assert meta["coordinate_frame"] == "world"
+
+    def test_legacy_npz_defaults_to_opencv(self, tab, tmp_path, monkeypatch):
+        meta = self._export(tab, tmp_path, monkeypatch, None)
+        assert meta["coordinate_frame"] == "opencv"
+
+
+class TestStaleWorldFrameCacheUpgrade:
+    """A pose3d.npz cached before 'Set coordinate system' is in the camera frame;
+    on load it must be auto-upgraded to the floor world frame using the world
+    frame from its OWN recorded calibration (so startup matches Run pipeline)."""
+
+    def _calib(self, tmp_path, with_world: bool):
+        from app.calib.stereo import save_calibration, update_world_frame
+
+        data = {
+            "image_size": [1024, 1024],
+            "lens_model": "standard",
+            "K1": np.eye(3),
+            "D1": np.zeros(5),
+            "K2": np.eye(3),
+            "D2": np.zeros(5),
+            "R": np.eye(3),
+            "T": np.array([-0.2, 0.0, 0.0]),
+            "E": np.zeros((3, 3)),
+            "F": np.zeros((3, 3)),
+            "rms": 0.5,
+            "n_frames": 10,
+        }
+        path = str(tmp_path / "calibration.yml")
+        save_calibration(data, {"type": "charuco"}, path)
+        if with_world:
+            # Pure +1 m X translation so the transform is trivially checkable.
+            update_world_frame(
+                path,
+                {
+                    "R": np.eye(3).tolist(),
+                    "t": [1.0, 0.0, 0.0],
+                    "origin": [0, 0, 0],
+                    "x_axis": [1, 0, 0],
+                    "y_axis": [0, 1, 0],
+                    "z_axis": [0, 0, 1],
+                    "board_long_m": 0.28,
+                    "board_short_m": 0.2,
+                },
+            )
+        return path
+
+    def _pose3d(self, tmp_path, calib_file, coordinate_frame=None):
+        joints = np.zeros((3, 1, 17, 3), np.float32)
+        joints[..., 0] = 2.0  # x=2 → a +1 X world frame makes it 3
+        conf = np.ones((3, 1, 17), np.float32)
+        meta = {"fps": 30.0, "calibration_file": calib_file}
+        if coordinate_frame:
+            meta["coordinate_frame"] = coordinate_frame
+        path = str(tmp_path / "pose3d.npz")
+        np.savez(
+            path,
+            joints3d=joints,
+            conf3d=conf,
+            repro_err=np.zeros((3, 1, 17), np.float32),
+            meta=np.array([meta], dtype=object),
+        )
+        return path
+
+    def test_stale_cache_upgraded_to_world(self, tab, tmp_path):
+        calib = self._calib(tmp_path, with_world=True)
+        path = self._pose3d(tmp_path, calib)  # no coordinate_frame → camera frame
+        tab._load_pose3d(path)
+        d = np.load(path, allow_pickle=True)
+        assert d["meta"].item()["coordinate_frame"] == "world"
+        assert np.allclose(d["joints3d"][..., 0], 3.0)  # 2 + 1 (world t_x)
+        assert np.allclose(d["joints3d"][..., 1], 0.0)  # Y/Z untouched
+
+    def test_camera_frame_cache_without_world_frame_untouched(self, tab, tmp_path):
+        calib = self._calib(tmp_path, with_world=False)
+        path = self._pose3d(tmp_path, calib)
+        tab._load_pose3d(path)
+        d = np.load(path, allow_pickle=True)
+        assert d["meta"].item().get("coordinate_frame") is None  # unchanged
+        assert np.allclose(d["joints3d"][..., 0], 2.0)  # not transformed
+
+    def test_already_world_cache_not_transformed_again(self, tab, tmp_path):
+        calib = self._calib(tmp_path, with_world=True)
+        path = self._pose3d(tmp_path, calib, coordinate_frame="world")
+        tab._load_pose3d(path)
+        d = np.load(path, allow_pickle=True)
+        assert d["meta"].item()["coordinate_frame"] == "world"
+        assert np.allclose(d["joints3d"][..., 0], 2.0)  # no double transform
+
+    def test_missing_source_calib_leaves_cache_alone(self, tab, tmp_path):
+        # calibration_file recorded in the NPZ no longer exists → don't guess.
+        path = self._pose3d(tmp_path, str(tmp_path / "gone.yml"))
+        tab._load_pose3d(path)
+        d = np.load(path, allow_pickle=True)
+        assert d["meta"].item().get("coordinate_frame") is None
+        assert np.allclose(d["joints3d"][..., 0], 2.0)
+
+
+class TestMatchingPose3dAutoload:
+    """On startup / video change the 3D auto-load follows the loaded videos (the
+    output path), never a generic pose3d.npz from a DIFFERENT recording — that
+    mismatch showed an unrelated skeleton over the previewed video."""
+
+    def _npz(self, path):
+        np.savez(
+            path,
+            joints3d=np.zeros((5, 1, 17, 3), np.float32),
+            conf3d=np.ones((5, 1, 17), np.float32),
+            repro_err=np.zeros((5, 1, 17), np.float32),
+            meta=np.array([{"fps": 30.0, "coordinate_frame": "opencv"}], dtype=object),
+        )
+
+    def test_loads_reconstruction_matching_output(self, tab, tmp_path):
+        match = tmp_path / "20260611_123852.npz"
+        self._npz(match)
+        tab._out_edit.setText(str(match))
+        tab._autoload_matching_pose3d(clear_if_missing=True)
+        assert tab._pose3d_path == str(match)
+
+    def test_ignores_generic_pose3d_when_match_absent(self, tab, tmp_path):
+        # A generic pose3d.npz (different recording) exists, but the output that
+        # matches the loaded videos does not → nothing is loaded.
+        self._npz(tmp_path / "pose3d.npz")
+        tab._out_edit.setText(str(tmp_path / "20260611_123852.npz"))  # no such file
+        tab._autoload_matching_pose3d(clear_if_missing=True)
+        assert tab._pose3d_path is None
+
+    def test_clear_drops_stale_skeleton_on_recording_switch(self, tab, tmp_path):
+        first = tmp_path / "rec_a.npz"
+        self._npz(first)
+        tab._load_pose3d(str(first))
+        assert tab._pose3d_path == str(first)
+        tab._out_edit.setText(str(tmp_path / "rec_b.npz"))  # no reconstruction yet
+        tab._autoload_matching_pose3d(clear_if_missing=True)
+        assert tab._pose3d_path is None  # stale skeleton cleared
+
+    def test_missing_without_clear_preserves_current(self, tab, tmp_path):
+        first = tmp_path / "rec_a.npz"
+        self._npz(first)
+        tab._load_pose3d(str(first))
+        tab._out_edit.setText(str(tmp_path / "rec_b.npz"))
+        tab._autoload_matching_pose3d(clear_if_missing=False)
+        assert tab._pose3d_path == str(first)  # not cleared (load-only context)
+
+
 class TestSiblingAutoSelect:
     """Picking one stereo video auto-proposes the matching pair."""
 
@@ -326,9 +498,7 @@ class TestSiblingAutoSelect:
         assert tab._sibling_video_path(str(left), "left", "right") is None
 
     def _patch_prompt(self, monkeypatch, answer):
-        monkeypatch.setattr(
-            "app.gui.recon_tab.QMessageBox.question", lambda *a, **k: answer
-        )
+        monkeypatch.setattr("app.gui.recon_tab.QMessageBox.question", lambda *a, **k: answer)
 
     def test_confirm_fills_empty_right(self, tab, tmp_path, monkeypatch):
         """Picking left → prompt → Yes → right is filled with the sibling."""
@@ -360,7 +530,7 @@ class TestSiblingAutoSelect:
         tab._right_edit.setText(str(tmp_path / "some_other_clip.avi"))
         tab._auto_select_sibling(tab._left_edit, left)
         assert prompted["shown"] is True
-        assert tab._right_edit.text() == right   # replaced after Yes
+        assert tab._right_edit.text() == right  # replaced after Yes
 
     def test_replace_declined_keeps_existing_right(self, tab, tmp_path, monkeypatch):
         """Declining the replace prompt keeps the previously-set right video."""
@@ -381,7 +551,7 @@ class TestSiblingAutoSelect:
 
         monkeypatch.setattr("app.gui.recon_tab.QMessageBox.question", _spy)
         left, right = self._make_pair(tmp_path, "20260602_113443")
-        tab._right_edit.setText(right)            # already the sibling
+        tab._right_edit.setText(right)  # already the sibling
         tab._auto_select_sibling(tab._left_edit, left)
         assert prompted["shown"] is False
 

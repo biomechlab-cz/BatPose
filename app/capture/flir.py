@@ -378,6 +378,18 @@ def list_camera_serials() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+class _WarmupNoFrames(Exception):
+    """Internal: a camera produced no frames during warmup (carries its label).
+
+    Raised from inside the warmup loop and caught in start() so the System is
+    released only after the warmup frame (and its live camera refs) has unwound.
+    """
+
+    def __init__(self, label: str):
+        super().__init__(label)
+        self.label = label
+
+
 class FlirCapture(BaseCapture):
     """
     Live stereo capture from two FLIR cameras using the PySpin (Spinnaker) SDK.
@@ -393,6 +405,12 @@ class FlirCapture(BaseCapture):
     sync=False: both cameras free-run independently (software sync only).
     primary: "left" or "right" — which camera acts as the trigger source.
     """
+
+    # Warmup bails out after this many back-to-back grab timeouts on one camera
+    # (× the 1 s GetNextImage timeout → ~3 s).  A correctly-synced camera at
+    # ≥20 fps never misses 3 consecutive 1 s windows, so this only fires when a
+    # camera genuinely isn't producing frames (e.g. wrong Primary / cable).
+    _WARMUP_MAX_CONSEC_TIMEOUTS = 3
 
     def __init__(
         self,
@@ -516,10 +534,32 @@ class FlirCapture(BaseCapture):
                 _log.debug("start: BeginAcquisition %s", label)
                 cam.BeginAcquisition()
 
+        # Drop transient local camera references (prim/sec or the freerun loop
+        # vars) before warmup.  If warmup aborts and releases the System, PySpin
+        # requires NO live Python camera handle at ReleaseInstance — only
+        # self._cam_left/right may hold them (the teardown drops those itself).
+        prim = sec = cam = label = None  # noqa: F841 — intentional ref drop
+
         # Let each camera's auto white-balance converge on live frames, then
         # freeze the converged per-camera ratios so colour tone is matched and
-        # stable for the rest of the session.
-        self._warmup_white_balance()
+        # stable for the rest of the session.  A wrong Primary / directional
+        # sync cable leaves one camera with no frames → warmup signals it and we
+        # release + raise an actionable error (after its frame has unwound, so no
+        # stray camera ref survives into ReleaseInstance).
+        dead_label: str | None = None
+        try:
+            self._warmup_white_balance()
+        except _WarmupNoFrames as nf:
+            dead_label = nf.label  # defer teardown — see below
+        if dead_label is not None:
+            # Tear down only now that the except block has exited: while it was
+            # active the exception's traceback pinned the warmup frame (and its
+            # live `cams`/`cam` camera refs), and ReleaseInstance() crashes if
+            # ANY Python camera handle is still alive.  Here only self._cam_*
+            # remain, which the teardown drops itself.
+            _log.warning("warmup: no frames from %s camera — aborting start", dead_label)
+            self._release_system_after_failed_start()
+            raise self._no_frames_error(dead_label)
 
         self._frame_idx = 0
         self._dropped = 0
@@ -542,23 +582,35 @@ class FlirCapture(BaseCapture):
         """
         import PySpin
 
-        cams = [c for c in (self._cam_left, self._cam_right) if c is not None]
+        cams = [(lbl, c) for lbl, c in (("left", self._cam_left), ("right", self._cam_right)) if c]
         if not cams:
             return
 
         _log.debug("white-balance warmup: %d frames", warmup_frames)
+        # A misconfigured hardware sync makes one camera deliver NO frames, so its
+        # every GetNextImage() blocks the full 1 s timeout — 30 frames × 1 s ≈ 30 s
+        # of apparent freeze.  The usual cause is the wrong Primary: the 6-pin GPIO
+        # cable is directional (primary ExposureActive OUT → secondary Line3 IN),
+        # so if the camera physically wired as the trigger source is set as the
+        # secondary it waits forever for a trigger that never comes.  Detect a few
+        # consecutive timeouts on any camera and abort with an actionable error
+        # instead of grinding through the whole warmup.
+        consec: dict[str, int] = {lbl: 0 for lbl, _ in cams}
         for _ in range(warmup_frames):
-            for cam in cams:
+            for lbl, cam in cams:
                 try:
                     img = cam.GetNextImage(1000)
-                    try:
-                        # We don't need the pixels — converging AWB just needs
-                        # the frames to flow through the ISP.
-                        pass
-                    finally:
-                        img.Release()
+                    # We don't need the pixels — converging AWB just needs the
+                    # frames to flow through the ISP.
+                    img.Release()
+                    consec[lbl] = 0
                 except PySpin.SpinnakerException:
-                    pass  # a missed trigger during warmup is harmless
+                    consec[lbl] += 1
+                    if consec[lbl] >= self._WARMUP_MAX_CONSEC_TIMEOUTS:
+                        # Signal start() to tear down + raise.  Teardown (incl.
+                        # ReleaseInstance) MUST run after this frame unwinds, or
+                        # the live `cams`/`cam` refs here crash PySpin's release.
+                        raise _WarmupNoFrames(lbl)
 
         # Freeze: Auto → Off retains the last auto-computed BalanceRatio.
         for label, cam in (("left", self._cam_left), ("right", self._cam_right)):
@@ -579,6 +631,34 @@ class FlirCapture(BaseCapture):
             except Exception as exc:
                 _log.debug("white-balance[%s]: freeze failed (%s)", label, exc)
 
+    def _no_frames_error(self, dead_label: str) -> RuntimeError:
+        """Build the actionable error for a camera that produced no frames.
+
+        Pure message construction — the caller (start()) performs the teardown
+        first, AFTER the warmup frame has unwound, so ReleaseInstance never sees
+        a stray camera reference (PySpin refcount rule).  The dominant cause is a
+        hardware-sync misconfiguration: the 6-pin GPIO cable is directional
+        (primary ExposureActive OUT → secondary Line 3 IN), so selecting the
+        wrong camera as Primary leaves the triggered camera waiting forever.
+        """
+        if self._sync:
+            other = "right" if self._primary == "left" else "left"
+            return RuntimeError(
+                f"No frames received from the {dead_label} camera.\n\n"
+                "Hardware sync is directional: only the camera wired to the trigger "
+                "OUTPUT can drive the other. The selected primary "
+                f"('{self._primary}') is most likely the wrong one for your cable.\n\n"
+                "Try one of:\n"
+                f"- Set the primary to '{other}' (Step 3), then Start again.\n"
+                "- Check the 6-pin GPIO sync cable is firmly seated on both cameras.\n"
+                "- Untick hardware sync to preview both cameras free-running."
+            )
+        return RuntimeError(
+            f"No frames received from the {dead_label} camera.\n\n"
+            "Check it is powered on and its USB 3.0 cable is securely connected, "
+            "then click 'Detect cameras' and Start again."
+        )
+
     def _release_system_after_failed_start(self) -> None:
         """Tear down partially-acquired Spinnaker handles when start() aborts.
 
@@ -598,6 +678,15 @@ class FlirCapture(BaseCapture):
         self._cam_list = None
         self._system = None
 
+        # EndAcquisition first if a camera was already streaming (the warmup
+        # abort happens after BeginAcquisition; the other callers run before it,
+        # where IsStreaming() is False → harmless no-op).
+        for cam in filter(None, (cam_left, cam_right)):
+            try:
+                if cam.IsStreaming():
+                    cam.EndAcquisition()
+            except Exception:
+                pass
         for cam in filter(None, (cam_left, cam_right)):
             try:
                 if cam.IsInitialized():

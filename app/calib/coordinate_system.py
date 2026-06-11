@@ -25,12 +25,58 @@ from __future__ import annotations
 
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ..recon3d.triangulate import triangulate_points_dlt, undistort_points
 
 # Minimum matched corners required to define a stable frame.
 _MIN_CORNERS = 6
+
+
+def _assemble_world_frame(
+    x_dir: np.ndarray,
+    normal: np.ndarray,
+    origin: np.ndarray,
+    long_m: float,
+    short_m: float,
+    extra: dict | None = None,
+) -> dict[str, Any]:
+    """Build the world-frame dict from a long-side direction, plane normal and origin.
+
+    Orients Z "up" (toward the camera at the origin: ``z·origin < 0``), then
+    orthonormalises X (long side), Z, and Y = Z × X (right-handed).  Returns the
+    camera→world rotation/translation plus the axes and metadata.
+    """
+    x_dir = np.asarray(x_dir, dtype=np.float64)
+    normal = np.asarray(normal, dtype=np.float64)
+    origin = np.asarray(origin, dtype=np.float64)
+
+    z_dir = normal.copy()
+    if float(z_dir @ origin) > 0.0:  # camera is "above" the floor → up = toward it
+        z_dir = -z_dir
+    x_dir = x_dir / (np.linalg.norm(x_dir) + 1e-12)
+    z_dir = z_dir - (z_dir @ x_dir) * x_dir
+    z_dir = z_dir / (np.linalg.norm(z_dir) + 1e-12)
+    y_dir = np.cross(z_dir, x_dir)
+    y_dir = y_dir / (np.linalg.norm(y_dir) + 1e-12)
+
+    B = np.column_stack([x_dir, y_dir, z_dir])  # world axes in camera coords
+    R_world = B.T
+    t_world = -B.T @ origin
+    out = {
+        "R": R_world.tolist(),
+        "t": t_world.tolist(),
+        "origin": origin.tolist(),
+        "x_axis": x_dir.tolist(),
+        "y_axis": y_dir.tolist(),
+        "z_axis": z_dir.tolist(),
+        "board_long_m": float(long_m),
+        "board_short_m": float(short_m),
+    }
+    if extra:
+        out.update(extra)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +111,62 @@ def _kabsch(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 
+def _world_frame_from_matched(
+    obj_pts: np.ndarray,
+    pts_cam1: np.ndarray,
+    centre_xy: tuple[float, float],
+    extent_x_m: float,
+    extent_y_m: float,
+    method: str,
+) -> dict[str, Any]:
+    """Kabsch-fit a board pose and build the world frame.
+
+    Args:
+        obj_pts:    ``[N, 3]`` board-frame corner coords (Z=0), metres.
+        pts_cam1:   ``[N, 3]`` the same corners triangulated into camera-1 3D.
+        centre_xy:  physical board centre in *board* coords (depends on the
+                    detector's object-point convention — see compute_world_frame).
+        extent_x_m / extent_y_m: physical board side lengths along board X / Y.
+        method:     tag stored in the result.
+
+    Raises:
+        ValueError if fewer than _MIN_CORNERS correspondences are given.
+    """
+    obj_pts = np.asarray(obj_pts, dtype=np.float64)
+    pts_cam1 = np.asarray(pts_cam1, dtype=np.float64)
+    if obj_pts.shape[0] < _MIN_CORNERS:
+        raise ValueError(
+            f"Need >= {_MIN_CORNERS} board corners to define a world frame; got {obj_pts.shape[0]}"
+        )
+
+    # Rigid fit board → camera-1.
+    R_bc, t_bc = _kabsch(obj_pts, pts_cam1)
+    fit_rms = float(np.sqrt(np.mean(np.sum((pts_cam1 - (obj_pts @ R_bc.T + t_bc)) ** 2, axis=1))))
+
+    ex, ey, ez = R_bc[:, 0], R_bc[:, 1], R_bc[:, 2]  # board axes in cam-1
+
+    # X = longer side; its in-plane orthogonal partner is the short side.
+    if extent_x_m >= extent_y_m:
+        x_dir, long_m, short_m = ex, extent_x_m, extent_y_m
+    else:
+        x_dir, long_m, short_m = ey, extent_y_m, extent_x_m
+
+    origin = R_bc @ np.array([centre_xy[0], centre_xy[1], 0.0]) + t_bc
+
+    return _assemble_world_frame(
+        x_dir,
+        ez,
+        origin,
+        long_m,
+        short_m,
+        extra={
+            "n_corners": int(obj_pts.shape[0]),
+            "fit_rms_m": fit_rms,
+            "method": method,
+        },
+    )
+
+
 def world_frame_from_corners(
     obj_pts: np.ndarray,
     pts_cam1: np.ndarray,
@@ -72,7 +174,11 @@ def world_frame_from_corners(
     squares_y: int,
     square_size: float,
 ) -> dict[str, Any]:
-    """Build the floor-board world frame from corner correspondences.
+    """Build the floor-board world frame from ChArUco corner correspondences.
+
+    ChArUco convention: squares_x/squares_y are SQUARE counts and the object
+    points put a board corner at (0, 0, 0) — inner corners run from (ss, ss),
+    so the physical board centre is (squares_x·ss/2, squares_y·ss/2).
 
     Args:
         obj_pts:   ``[N, 3]`` board-frame corner coords (Z=0), metres.
@@ -93,69 +199,11 @@ def world_frame_from_corners(
     Raises:
         ValueError if fewer than _MIN_CORNERS correspondences are given.
     """
-    obj_pts = np.asarray(obj_pts, dtype=np.float64)
-    pts_cam1 = np.asarray(pts_cam1, dtype=np.float64)
-    if obj_pts.shape[0] < _MIN_CORNERS:
-        raise ValueError(
-            f"Need >= {_MIN_CORNERS} board corners to define a world frame; "
-            f"got {obj_pts.shape[0]}"
-        )
-
-    # Rigid fit board → camera-1.
-    R_bc, t_bc = _kabsch(obj_pts, pts_cam1)
-    fit_rms = float(np.sqrt(np.mean(np.sum((pts_cam1 - (obj_pts @ R_bc.T + t_bc)) ** 2, axis=1))))
-
-    ex, ey, ez = R_bc[:, 0], R_bc[:, 1], R_bc[:, 2]  # board axes in cam-1
-
-    Lx = squares_x * square_size  # physical extent along board X
-    Ly = squares_y * square_size  # physical extent along board Y
-
-    # X = longer side, the in-plane orthogonal partner becomes the short side.
-    if Lx >= Ly:
-        x_dir = ex
-        long_m, short_m = Lx, Ly
-    else:
-        x_dir = ey
-        long_m, short_m = Ly, Lx
-
-    # Board centre in camera-1 (origin convention: a board corner at (0,0,0),
-    # so the physical centre is at (Lx/2, Ly/2, 0) — also the corner centroid).
-    origin = R_bc @ np.array([Lx / 2.0, Ly / 2.0, 0.0]) + t_bc
-
-    # Z points "up" = away from the floor, toward the cameras.  The camera-1
-    # centre is at the origin, the board centre is at `origin`, so the
-    # board→camera direction is -origin.  Orient the board normal to agree
-    # with it (robust to any camera tilt; no Y-down/Z-forward assumption).
-    z_dir = ez.copy()
-    if float(z_dir @ origin) > 0.0:
-        z_dir = -z_dir
-
-    # Orthonormalise: X first, then Z ⟂ X, then Y = Z × X (right-handed, along
-    # the short side).
-    x_dir = x_dir / (np.linalg.norm(x_dir) + 1e-12)
-    z_dir = z_dir - (z_dir @ x_dir) * x_dir
-    z_dir = z_dir / (np.linalg.norm(z_dir) + 1e-12)
-    y_dir = np.cross(z_dir, x_dir)
-    y_dir = y_dir / (np.linalg.norm(y_dir) + 1e-12)
-
-    # Basis whose columns are the world axes in camera-1 coords:
-    #   p_cam1 = B @ p_world + origin   ⇒   p_world = Bᵀ (p_cam1 − origin)
-    B = np.column_stack([x_dir, y_dir, z_dir])
-    R_world = B.T
-    t_world = -B.T @ origin
-
-    return {
-        "R": R_world.tolist(),
-        "t": t_world.tolist(),
-        "origin": origin.tolist(),
-        "x_axis": x_dir.tolist(),
-        "y_axis": y_dir.tolist(),
-        "z_axis": z_dir.tolist(),
-        "board_long_m": float(long_m),
-        "board_short_m": float(short_m),
-        "n_corners": int(obj_pts.shape[0]),
-        "fit_rms_m": fit_rms,
-    }
+    Lx = squares_x * square_size
+    Ly = squares_y * square_size
+    return _world_frame_from_matched(
+        obj_pts, pts_cam1, (Lx / 2.0, Ly / 2.0), Lx, Ly, "charuco_stereo"
+    )
 
 
 def _match_corners(det_left, det_right):
@@ -209,18 +257,50 @@ def compute_world_frame(det_left, det_right, calib: dict) -> dict[str, Any]:
     P2 = np.hstack([R, T.reshape(3, 1)])
     pts_cam1 = triangulate_points_dlt(P1.astype(np.float64), P2.astype(np.float64), pl, pr)
 
-    board = calib.get("board_cfg", {})
-    sx = int(board.get("squares_x", 0))
-    sy = int(board.get("squares_y", 0))
-    ss = float(board.get("square_size", 0.0))
-    if sx < 2 or sy < 2 or ss <= 0:
-        # Fall back to the board's actual corner extent if cfg is incomplete.
-        span = obj_common.max(axis=0) - obj_common.min(axis=0)
-        ss = 1.0
-        sx = float(span[0]) + 1.0
-        sy = float(span[1]) + 1.0
+    # Board geometry depends on the detector's object-point convention:
+    #   • ChArUco cfg (squares_x/squares_y = SQUARE counts): object points put a
+    #     board corner at (0,0) and inner corners start at (ss, ss) → physical
+    #     centre = (squares_x·ss/2, squares_y·ss/2).
+    #   • Plain checkerboard cfg (cols/rows = INNER-CORNER counts): object
+    #     points start at the first inner corner (0,0) → the board is symmetric
+    #     about the inner-corner-grid centroid ((cols−1)·ss/2, (rows−1)·ss/2)
+    #     and physically spans one extra square per side: (cols+1)·ss × (rows+1)·ss.
+    # Reading checkerboard cfgs through the charuco keys used to fall into a
+    # fallback that mixed metres with square counts (ss=1.0, sx=span+1 → a
+    # 9×6/25 mm board became ~1.2 m wide).
+    board = calib.get("board_cfg", {}) or {}
+    ss = float(board.get("square_size", 0.0) or 0.0)
+    sx = int(board.get("squares_x", 0) or 0)
+    sy = int(board.get("squares_y", 0) or 0)
+    cols = int(board.get("cols", 0) or 0)
+    rows = int(board.get("rows", 0) or 0)
 
-    return world_frame_from_corners(obj_common, pts_cam1, sx, sy, ss)
+    if sx >= 2 and sy >= 2 and ss > 0:
+        return world_frame_from_corners(obj_common, pts_cam1, sx, sy, ss)
+    if cols >= 2 and rows >= 2 and ss > 0:
+        centre = ((cols - 1) * ss / 2.0, (rows - 1) * ss / 2.0)
+        return _world_frame_from_matched(
+            obj_common,
+            pts_cam1,
+            centre,
+            (cols + 1) * ss,
+            (rows + 1) * ss,
+            "checkerboard_stereo",
+        )
+    # Unknown / incomplete cfg — stay unit-correct: side lengths from the
+    # detected corner extents (metres, slightly smaller than the physical
+    # board) and the centre from their midpoint.
+    mn = obj_common.min(axis=0)
+    mx = obj_common.max(axis=0)
+    centre = (float(mn[0] + mx[0]) / 2.0, float(mn[1] + mx[1]) / 2.0)
+    return _world_frame_from_matched(
+        obj_common,
+        pts_cam1,
+        centre,
+        float(mx[0] - mn[0]),
+        float(mx[1] - mn[1]),
+        "corner_span_stereo",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,16 +329,279 @@ def axis_endpoints_cam1(world_frame: dict, length: float | None = None) -> np.nd
 
     Args:
         world_frame: world-frame dict.
-        length: axis length in metres.  Defaults to a quarter of the board's
-                shorter side (so the triad sits neatly on the board).
+        length: axis length in metres.  Defaults to 0.6× the board's shorter
+                side, so the triad spans a clearly-visible portion of the board
+                (the board is often ~2 m from the cameras → small in the preview)
+                while still fitting on it.
 
     Returns:
         ``[4, 3]`` float32: row 0 = origin, rows 1..3 = origin + length·axis.
     """
     origin = np.asarray(world_frame["origin"], dtype=np.float64)
     if length is None:
-        length = 0.25 * float(world_frame.get("board_short_m", 0.2)) or 0.05
+        length = 0.6 * float(world_frame.get("board_short_m", 0.2)) or 0.12
     pts = [origin]
     for key in ("x_axis", "y_axis", "z_axis"):
         pts.append(origin + length * np.asarray(world_frame[key], dtype=np.float64))
     return np.asarray(pts, dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Chessboard / monocular path (for a board too far for ArUco markers to decode)
+# ---------------------------------------------------------------------------
+#
+# On a board lying on the floor across the room, the ArUco markers are too few
+# pixels to detect/decode, so ChArUco yields nothing.  The plain checker corners
+# of the SAME board are still found by cv2.findChessboardCorners, but those have
+# no per-corner identity, so the stereo left↔right correspondence is ambiguous
+# (the two views can order the grid differently → garbage triangulation).  We
+# therefore recover the board pose with **monocular solvePnP** from the
+# reference camera — no cross-camera correspondence required.
+
+
+def board_squares(board_cfg: dict | None) -> tuple[int, int, float]:
+    """Resolve a board config to ``(squares_x, squares_y, square_size)``.
+
+    Handles both persisted conventions: ChArUco saves SQUARE counts
+    (``squares_x``/``squares_y``); plain checkerboards save INNER-CORNER counts
+    (``cols``/``rows``), which map to squares as ``cols+1`` / ``rows+1``.
+    Returns ``(0, 0, 0.0)`` when the config is unusable — callers treat that as
+    "chessboard geometry unknown".
+    """
+    b = board_cfg or {}
+    ss = float(b.get("square_size", 0.0) or 0.0)
+    sx = int(b.get("squares_x", 0) or 0)
+    sy = int(b.get("squares_y", 0) or 0)
+    if sx >= 2 and sy >= 2 and ss > 0:
+        return sx, sy, ss
+    cols = int(b.get("cols", 0) or 0)
+    rows = int(b.get("rows", 0) or 0)
+    if cols >= 2 and rows >= 2 and ss > 0:
+        return cols + 1, rows + 1, ss
+    return 0, 0, 0.0
+
+
+def centered_board_objpoints(squares_x: int, squares_y: int, square_size: float) -> np.ndarray:
+    """Inner-corner grid centred on the board centre (so solvePnP's t = centre).
+
+    Ordered row-major to match ``cv2.findChessboardCorners((squares_x-1,
+    squares_y-1))``: (squares_x-1) corners per row, (squares_y-1) rows.
+    """
+    cols, rows = squares_x - 1, squares_y - 1
+    return np.array(
+        [
+            [(c - (cols - 1) / 2.0) * square_size, (r - (rows - 1) / 2.0) * square_size, 0.0]
+            for r in range(rows)
+            for c in range(cols)
+        ],
+        dtype=np.float64,
+    )
+
+
+def detect_chessboard_corners(
+    gray: np.ndarray, squares_x: int, squares_y: int
+) -> np.ndarray | None:
+    """Detect the inner checker corners of the board; sub-pixel refined.
+
+    Returns ``[(squares_x-1)*(squares_y-1), 2]`` float64 pixel corners, or None.
+    More robust than ArUco at distance/oblique angle (corner geometry vs marker
+    bit-decoding).
+    """
+    pat = (squares_x - 1, squares_y - 1)
+    ok, corners = cv2.findChessboardCorners(
+        gray, pat, cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+    )
+    if not ok or corners is None:
+        return None
+    corners = cv2.cornerSubPix(
+        gray,
+        corners,
+        (11, 11),
+        (-1, -1),
+        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01),
+    )
+    return corners.reshape(-1, 2).astype(np.float64)
+
+
+def world_frame_from_board_pose(
+    R_bc: np.ndarray,
+    t_bc: np.ndarray,
+    squares_x: int,
+    squares_y: int,
+    square_size: float,
+    extra: dict | None = None,
+) -> dict[str, Any]:
+    """Build a world frame from a board→camera pose (origin already at centre)."""
+    R_bc = np.asarray(R_bc, dtype=np.float64)
+    ex, ey = R_bc[:, 0], R_bc[:, 1]
+    ez = R_bc[:, 2]
+    Lx, Ly = squares_x * square_size, squares_y * square_size
+    if Lx >= Ly:
+        x_dir, long_m, short_m = ex, Lx, Ly
+    else:
+        x_dir, long_m, short_m = ey, Ly, Lx
+    return _assemble_world_frame(
+        x_dir, ez, np.asarray(t_bc, dtype=np.float64), long_m, short_m, extra
+    )
+
+
+def vote_world_frames(
+    frames: list[dict],
+    angle_tol_deg: float = 15.0,
+    min_agreement: float = 0.6,
+) -> dict[str, Any]:
+    """Majority-vote a single world frame from per-frame candidates.
+
+    Single-view planar PnP has a two-fold pose ambiguity: on ~10 % of frames the
+    recovered board normal flips ~110° with NO reprojection-error signature
+    (measured on hardware: flipped frames had identical RMS to good ones, and
+    the two IPPE branches differed by only 0.1 px — so the error metric cannot
+    disambiguate).  The flips are temporally sporadic, so voting over a short
+    burst of frames removes them; averaging the winning cluster also reduces
+    origin noise by ~1/√N.
+
+    Clustering is by board normal (``z_axis``) around the medoid candidate; the
+    chessboard's 180° in-plane ambiguity is folded by aligning each member's X
+    to the medoid's before averaging.
+
+    Args:
+        frames: world-frame dicts (≥ 1), e.g. from compute_world_frame_monocular.
+        angle_tol_deg: cluster radius around the medoid normal.
+        min_agreement: required fraction of candidates in the winning cluster.
+
+    Returns:
+        Fused world-frame dict with extra keys ``n_votes``, ``n_agree``,
+        ``vote_agreement`` and a ``method`` suffixed ``"_voted"``.
+
+    Raises:
+        ValueError if no candidates are given, agreement is below
+        *min_agreement*, or the in-plane X direction is ambiguous.
+    """
+    if not frames:
+        raise ValueError("no world-frame candidates to vote on")
+    if len(frames) == 1:
+        out = dict(frames[0])
+        out.update({"n_votes": 1, "n_agree": 1, "vote_agreement": 1.0})
+        return out
+
+    Z = np.asarray([f["z_axis"] for f in frames], dtype=np.float64)
+    Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
+    # Medoid = the candidate whose normal agrees best with all the others.
+    S = Z @ Z.T
+    medoid = int(np.argmax(S.sum(axis=1)))
+    keep = S[medoid] >= np.cos(np.radians(angle_tol_deg))
+    agreement = float(keep.mean())
+    if agreement < min_agreement:
+        raise ValueError(
+            f"board pose is ambiguous: only {int(keep.sum())}/{len(frames)} frames "
+            f"agree on the floor orientation. Move the board (or camera) so the "
+            f"board is seen less obliquely, then try again."
+        )
+
+    sel = [f for f, k in zip(frames, keep) if k]
+    med = frames[medoid]
+    # Fold the 180° in-plane ambiguity onto the medoid's X before averaging.
+    x_ref = np.asarray(med["x_axis"], dtype=np.float64)
+    xs = []
+    for f in sel:
+        x = np.asarray(f["x_axis"], dtype=np.float64)
+        xs.append(x if float(x @ x_ref) >= 0.0 else -x)
+    x_mean = np.mean(xs, axis=0)
+    if float(np.linalg.norm(x_mean)) < 0.5:
+        raise ValueError("board X direction is ambiguous across frames — try again")
+    z_mean = np.mean([np.asarray(f["z_axis"], dtype=np.float64) for f in sel], axis=0)
+    o_mean = np.mean([np.asarray(f["origin"], dtype=np.float64) for f in sel], axis=0)
+
+    extra: dict[str, Any] = {
+        "n_votes": len(frames),
+        "n_agree": int(keep.sum()),
+        "vote_agreement": agreement,
+        "method": str(med.get("method", "")) + "_voted",
+    }
+    rms = [float(f["fit_rms_px"]) for f in sel if "fit_rms_px" in f]
+    if rms:
+        extra["fit_rms_px"] = float(np.mean(rms))
+    if med.get("n_corners") is not None:
+        extra["n_corners"] = int(med["n_corners"])
+
+    return _assemble_world_frame(
+        x_mean,
+        z_mean,
+        o_mean,
+        float(med["board_long_m"]),
+        float(med["board_short_m"]),
+        extra,
+    )
+
+
+def compute_world_frame_monocular(
+    img_pts: np.ndarray,
+    K: np.ndarray,
+    D: np.ndarray,
+    squares_x: int,
+    squares_y: int,
+    square_size: float,
+    fisheye: bool,
+    cam_to_ref: tuple[np.ndarray, np.ndarray] | None = None,
+) -> dict[str, Any]:
+    """World frame from one camera's chessboard corners via solvePnP.
+
+    The board pose is recovered in the coordinate frame of the camera whose
+    (K, D) are given.  The world frame must live in camera-1 (left) coords (the
+    triangulation / pose3d frame), so:
+      • pass the LEFT camera's (K1, D1) and ``cam_to_ref=None``; or
+      • pass the RIGHT camera's (K2, D2) and ``cam_to_ref=(R, T)`` — the stereo
+        extrinsics — and the recovered pose is transformed into camera-1
+        coords (``p_cam1 = Rᵀ(p_cam2 − T)``) before the frame is built.
+
+    This lets "Set coordinate system" succeed when only one camera sees the
+    board clearly (e.g. it sits near the left frame's edge but is central in the
+    right).
+
+    Raises ValueError if the corner count doesn't match the board.
+    """
+    objp = centered_board_objpoints(squares_x, squares_y, square_size)
+    img_pts = np.asarray(img_pts, dtype=np.float64)
+    if img_pts.shape[0] != objp.shape[0]:
+        raise ValueError(f"expected {objp.shape[0]} chessboard corners, got {img_pts.shape[0]}")
+
+    Kf = np.asarray(K, dtype=np.float64)
+    Df = np.asarray(D, dtype=np.float64)
+    if fisheye:
+        # Undistort to normalized rays, then PnP with identity intrinsics.
+        und = cv2.fisheye.undistortPoints(img_pts.reshape(-1, 1, 2), Kf, Df.reshape(4, 1))
+        ok, rvec, tvec = cv2.solvePnP(
+            objp, und.reshape(-1, 1, 2), np.eye(3), None, flags=cv2.SOLVEPNP_ITERATIVE
+        )
+        proj, _ = cv2.fisheye.projectPoints(
+            objp.reshape(-1, 1, 3), rvec, tvec, Kf, Df.reshape(4, 1)
+        )
+    else:
+        ok, rvec, tvec = cv2.solvePnP(
+            objp, img_pts.reshape(-1, 1, 2), Kf, Df, flags=cv2.SOLVEPNP_ITERATIVE
+        )
+        proj, _ = cv2.projectPoints(objp, rvec, tvec, Kf, Df)
+    if not ok:
+        raise ValueError("solvePnP failed to recover the board pose")
+
+    rms = float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - img_pts) ** 2, axis=1))))
+    R_bc, _ = cv2.Rodrigues(rvec)
+    t_bc = tvec.reshape(3)
+    method = "chessboard_pnp"
+
+    if cam_to_ref is not None:
+        # Transform board→thisCam into board→cam1 using the stereo extrinsics.
+        R = np.asarray(cam_to_ref[0], dtype=np.float64)
+        T = np.asarray(cam_to_ref[1], dtype=np.float64).reshape(3)
+        R_bc = R.T @ R_bc
+        t_bc = R.T @ (t_bc - T)
+        method = "chessboard_pnp_ref"
+
+    return world_frame_from_board_pose(
+        R_bc,
+        t_bc,
+        squares_x,
+        squares_y,
+        square_size,
+        extra={"n_corners": int(img_pts.shape[0]), "fit_rms_px": rms, "method": method},
+    )

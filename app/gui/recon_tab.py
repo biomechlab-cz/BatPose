@@ -72,10 +72,11 @@ class ReconTab(QWidget):
         self._pose3d_path: str | None = None
         self._pose2d_left_path: str | None = None
         self._pose2d_right_path: str | None = None
-        # Deferred pose3d path: set when set_project_dir() is called before the
-        # widget is first shown (GL context not yet created).  Processed in
-        # showEvent() once the GL context is ready.
-        self._pending_pose3d_path: str | None = None
+        # Deferred auto-load: set when set_project_dir() runs before the widget
+        # is first shown (GL context not yet created, video/output fields not yet
+        # restored).  showEvent() then loads the reconstruction matching the
+        # loaded videos.
+        self._pending_autoload: bool = False
         # When True, the output filename tracks the source videos automatically
         # (e.g. 20260602_121151_left.avi → 20260602_121151.npz).  A manual edit
         # of the output field or an explicit Save-As turns this off so the
@@ -104,7 +105,6 @@ class ReconTab(QWidget):
             calib = d / "calibration.yml"
             if calib.exists():
                 self._calib_edit.setText(str(calib))
-        pose3d = d / "pose3d.npz"
         # Default the output path inside the project folder.  When videos are
         # already known this derives a recording-matched name (<stamp>.npz);
         # otherwise it falls back to <project>/pose3d.npz until videos load.
@@ -120,16 +120,16 @@ class ReconTab(QWidget):
         if p2d_r.exists() and not self._pose2d_right_path:
             self._pose2d_right_path = str(p2d_r)
 
-        # Auto-load any existing reconstruction so the user can view results
-        # immediately without re-running the pipeline.
-        # Guard: pyqtgraph's GLViewWidget.addItem() calls makeCurrent() which
-        # fails before the widget is first shown (GL context not yet created).
-        # If not visible yet, store the path and defer until showEvent().
-        if pose3d.exists():
-            if self.isVisible():
-                self._try_auto_load_pose3d(str(pose3d))
-            else:
-                self._pending_pose3d_path = str(pose3d)
+        # Auto-load the reconstruction that MATCHES the loaded videos so the user
+        # can view results without re-running.  Must NOT load a hardcoded
+        # <project>/pose3d.npz: that may be from a different recording than the
+        # one whose videos are loaded → the 3D skeleton would mismatch the 2D
+        # previews.  Deferred to showEvent when not yet visible (GL context isn't
+        # created, and session restore of the video/output fields runs first).
+        if self.isVisible():
+            self._autoload_matching_pose3d(clear_if_missing=True)
+        else:
+            self._pending_autoload = True
 
         # Refresh the Load-Last-Recording button now that the project (and its
         # capture folder) is known.
@@ -138,20 +138,20 @@ class ReconTab(QWidget):
     def showEvent(self, event) -> None:
         """Tab-shown housekeeping.
 
-        1. Process any pose3d load deferred from set_project_dir() (which runs
-           during session restore, before the GL context exists — calling
-           _load_pose3d() then would add GL items before makeCurrent() succeeds).
-           We stash the path and process it here via a zero-timeout singleShot
-           so we run after the first paintGL().
+        1. Process any pose3d auto-load deferred from set_project_dir() (which
+           runs during session restore, before the GL context exists — calling
+           _load_pose3d() then would add GL items before makeCurrent() succeeds,
+           and the video/output fields aren't restored yet).  We run it here via
+           a zero-timeout singleShot so we run after the first paintGL() and
+           after restore has set the matching output path.
         2. Re-scan for the latest recording (one may have been made in the
            Capture tab since this tab was last shown).
         3. Sync the 3D viewer and 2D preview to the current slider position.
         """
         super().showEvent(event)
-        if self._pending_pose3d_path is not None:
-            path = self._pending_pose3d_path
-            self._pending_pose3d_path = None
-            QTimer.singleShot(0, lambda: self._try_auto_load_pose3d(path))
+        if self._pending_autoload:
+            self._pending_autoload = False
+            QTimer.singleShot(0, lambda: self._autoload_matching_pose3d(clear_if_missing=True))
         self._refresh_last_recording_btn()
         if self._pose3d_path is not None:
             self._viewer.show_frame(self._slider.value())
@@ -179,6 +179,39 @@ class ReconTab(QWidget):
         if candidate and Path(candidate).is_file() and candidate != self._pose3d_path:
             self._log_msg("Found existing pose3d.npz — loading automatically…")
             self._load_pose3d(candidate)
+
+    def _autoload_matching_pose3d(self, clear_if_missing: bool = False) -> None:
+        """Load the reconstruction that corresponds to the loaded videos.
+
+        The output path tracks the source videos (e.g. ``20260611_123852.npz``),
+        so it is the pose3d for the previewed recording.  Loading the generic
+        ``<project>/pose3d.npz`` instead showed a skeleton from a DIFFERENT
+        recording — a 3D-vs-2D mismatch on startup.  When no matching
+        reconstruction exists and *clear_if_missing* is set, drop any currently
+        shown skeleton so the viewer never disagrees with the previewed videos.
+        """
+        candidate = self._out_edit.text().strip()
+        if not candidate:
+            left = self._left_edit.text().strip()
+            if left:
+                candidate = str(Path(left).parent / "pose3d.npz")
+        if candidate and Path(candidate).is_file():
+            self._try_auto_load_pose3d(candidate)
+        elif clear_if_missing:
+            self._clear_pose3d()
+
+    def _clear_pose3d(self) -> None:
+        """Drop the loaded 3D when it doesn't match the current videos."""
+        if self._pose3d_path is None:
+            return
+        self._pose3d_path = None
+        self._viewer.clear()
+        self._slider.setRange(0, 0)
+        self._slider.setValue(0)
+        self._frame_label.setText(self._frame_label_text(0, 0))
+        self._log_msg(
+            "No reconstruction matches the loaded videos yet — click Run Pipeline to create it."
+        )
 
     # ------------------------------------------------------------------
     # UI construction
@@ -234,8 +267,7 @@ class ReconTab(QWidget):
         # pair is actually present.
         self._load_last_btn = QPushButton("Load Last Recording")
         self._load_last_btn.setToolTip(
-            "Load the most recent left/right recording from the project's "
-            "capture folder."
+            "Load the most recent left/right recording from the project's capture folder."
         )
         self._load_last_btn.clicked.connect(self._on_load_last_recording)
         self._load_last_btn.setEnabled(False)
@@ -298,14 +330,14 @@ class ReconTab(QWidget):
 
         self._min_cutoff = QDoubleSpinBox()
         self._min_cutoff.setRange(0.01, 10.0)
-        self._min_cutoff.setValue(1.0)   # less aggressive: was 0.5 Hz
+        self._min_cutoff.setValue(1.0)  # less aggressive: was 0.5 Hz
         self._min_cutoff.setSuffix(" Hz")
         self._min_cutoff.setDecimals(2)
         oform.addRow("1€ min_cutoff:", self._min_cutoff)
 
         self._beta = QDoubleSpinBox()
         self._beta.setRange(0.0, 10.0)
-        self._beta.setValue(0.5)         # less aggressive: was 0.05
+        self._beta.setValue(0.5)  # less aggressive: was 0.05
         self._beta.setDecimals(3)
         oform.addRow("1€ beta:", self._beta)
 
@@ -562,7 +594,7 @@ class ReconTab(QWidget):
         idx = lower.find(token)
         if idx == -1:
             return None
-        sib_name = name[:idx] + f"_{to_side}" + name[idx + len(token):]
+        sib_name = name[:idx] + f"_{to_side}" + name[idx + len(token) :]
         sib = p.with_name(sib_name)
         return str(sib) if sib.is_file() else None
 
@@ -659,8 +691,7 @@ class ReconTab(QWidget):
             )
         else:
             self._load_last_btn.setToolTip(
-                f"Load the most recent recording:\n{Path(pair[0]).name} / "
-                f"{Path(pair[1]).name}"
+                f"Load the most recent recording:\n{Path(pair[0]).name} / {Path(pair[1]).name}"
             )
 
     def _on_load_last_recording(self) -> None:
@@ -673,9 +704,10 @@ class ReconTab(QWidget):
         self._apply_video_meta(self._left_edit, left)
         self._right_edit.setText(right)
         self._apply_video_meta(self._right_edit, right)
-        self._log_msg(
-            f"Loaded last recording: {Path(left).name} / {Path(right).name}"
-        )
+        self._log_msg(f"Loaded last recording: {Path(left).name} / {Path(right).name}")
+        # Sync the 3D to this recording: load its reconstruction if present, else
+        # clear so an earlier recording's skeleton doesn't linger in the viewer.
+        self._autoload_matching_pose3d(clear_if_missing=True)
 
     def _browse_calib(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select Calibration", "", "YAML (*.yml *.yaml)")
@@ -704,9 +736,7 @@ class ReconTab(QWidget):
         left = self._left_edit.text().strip()
         right = self._right_edit.text().strip()
         if left and right:
-            common = os.path.commonprefix(
-                [Path(left).stem, Path(right).stem]
-            ).rstrip("_- ")
+            common = os.path.commonprefix([Path(left).stem, Path(right).stem]).rstrip("_- ")
             if common:
                 return common
         if left:
@@ -842,7 +872,9 @@ class ReconTab(QWidget):
         # pipeline completes (or even mid-pipeline if pose2d finishes first).
         self._pose2d_left_path = out_left
         self._pose2d_right_path = out_right
-        backend_name = "rtmpose" if "rtmpose" in self._backend_combo.currentText().lower() else "mediapipe"
+        backend_name = (
+            "rtmpose" if "rtmpose" in self._backend_combo.currentText().lower() else "mediapipe"
+        )
 
         self._log_msg(f"\nStep 1/2: Extracting 2D poses (backend={backend_name})…")
         self._run_btn.setEnabled(False)
@@ -971,11 +1003,22 @@ class ReconTab(QWidget):
             d = np.load(path, allow_pickle=True)
             joints3d = d["joints3d"]  # [T, P, 17, 3]
             conf3d = d["conf3d"]  # [T, P, 17]
+            repro = d["repro_err"] if "repro_err" in d.files else None
             meta = d["meta"].item()
+            d.close()  # release the file handle before any re-save (Windows lock)
 
-            # If the pipeline already expressed joints in a Z-up floor world
-            # frame (a "Set coordinate system" board frame), the viewer must NOT
-            # re-apply its OpenCV→Z-up swap.
+            # A pose3d.npz cached before the floor coordinate system was set is
+            # in the camera frame (coordinate_frame != "world"), so on startup it
+            # auto-loads with the legacy Z-up swap and looks rotated vs the room —
+            # while Run pipeline now produces world coordinates.  Bring the cache
+            # up to date instead of silently showing the stale orientation.
+            if meta.get("coordinate_frame") != "world":
+                joints3d, meta = self._upgrade_cached_world_frame(
+                    path, joints3d, conf3d, repro, meta
+                )
+
+            # If joints are already in the Z-up floor world frame, the viewer must
+            # NOT re-apply its OpenCV→Z-up swap.
             already_world = meta.get("coordinate_frame") == "world"
             self._viewer.set_data(joints3d, conf3d, world_frame=already_world)
             T = joints3d.shape[0]
@@ -1008,6 +1051,75 @@ class ReconTab(QWidget):
             self.pose3d_ready.emit(path)
         except Exception as e:
             self._log_msg(f"Failed to load {path}: {e}")
+
+    def _upgrade_cached_world_frame(self, path, joints3d, conf3d, repro, meta):
+        """Re-express a camera-frame cache in the floor world frame, if one exists.
+
+        A pose3d.npz written before "Set coordinate system" stores joints in the
+        camera-1 frame.  The pipeline applies the world frame as its LAST step
+        (after smoothing), so re-applying the SAME calibration's world frame to
+        the stored joints is identical to re-running — no re-triangulation.
+
+        The joints belong to the camera frame of the calibration recorded in
+        ``meta["calibration_file"]``, so we read the world frame from *that* file
+        (not the currently-selected calibration) — its frame matches the stored
+        joints, eliminating any cross-calibration mismatch.  The upgraded result
+        is re-saved so every consumer (viewer, Analysis tab, CSV export) agrees.
+
+        Returns the (possibly transformed) ``(joints3d, meta)``.
+        """
+        calib_file = meta.get("calibration_file")
+        if not calib_file or not Path(calib_file).is_file():
+            # Can't verify the source calibration. If the *selected* one has a
+            # floor frame, the cache is probably stale — point the user at re-run.
+            sel = self._calib_edit.text().strip()
+            if sel and Path(sel).is_file():
+                try:
+                    from app.calib.stereo import load_calibration
+
+                    if load_calibration(sel).get("world_frame") is not None:
+                        self._log_msg(
+                            "Note: this cached pose3d.npz is in the camera frame and "
+                            "predates the floor coordinate system. Click Run pipeline "
+                            "to recompute it in world coordinates."
+                        )
+                except Exception:
+                    pass
+            return joints3d, meta
+
+        try:
+            from app.calib.coordinate_system import apply_world_frame
+            from app.calib.stereo import load_calibration
+
+            wf = load_calibration(calib_file).get("world_frame")
+        except Exception:
+            return joints3d, meta
+        if wf is None:
+            return joints3d, meta  # genuinely a camera-frame result (no floor frame set)
+
+        joints_world = apply_world_frame(joints3d, wf).astype(np.float32)
+        new_meta = dict(meta)
+        new_meta["coordinate_frame"] = "world"
+        new_meta["world_frame"] = wf
+        try:
+            if repro is None:
+                repro = np.zeros(conf3d.shape, dtype=np.float32)
+            np.savez_compressed(
+                path,
+                joints3d=joints_world,
+                conf3d=conf3d,
+                repro_err=repro,
+                meta=np.array([new_meta], dtype=object),
+            )
+            self._log_msg(
+                "Updated cached pose3d.npz to the floor coordinate system "
+                "(it predated 'Set coordinate system'). Re-run the pipeline if "
+                "you re-calibrated the cameras."
+            )
+        except Exception as exc:
+            # Display correctly even if the file can't be rewritten (read-only…).
+            self._log_msg(f"Applied floor coordinate system in memory (re-save failed: {exc})")
+        return joints_world, new_meta
 
     def _refresh_2d_preview(self) -> None:
         """Push current video + pose2d paths into the preview widget."""
@@ -1066,6 +1178,9 @@ class ReconTab(QWidget):
             metadata: dict = {
                 "fps": fps,
                 "coordinate_units": "meters",
+                # "opencv" = camera-1 frame (X right, Y down, Z forward);
+                # "world"  = floor-board frame (origin on the floor, Z up) — ADR-010.
+                "coordinate_frame": str(meta.get("coordinate_frame", "opencv")),
                 "n_frames": T,
                 "n_persons": P,
                 "n_joints": J,
@@ -1107,7 +1222,7 @@ class ReconTab(QWidget):
         # Skip rendering entirely when this tab is hidden — the Analysis tab
         # drives the slider via frame_seek while its own playback runs.
         if self.isVisible():
-            self._viewer.show_frame(value)   # cheap GL update — every frame
+            self._viewer.show_frame(value)  # cheap GL update — every frame
             # Non-blocking: the preview decodes on a background thread and
             # coalesces to the latest requested frame, so driving it every
             # frame during playback does not stall the 3D view.
@@ -1120,7 +1235,7 @@ class ReconTab(QWidget):
         if checked:
             self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPause))
             self._play_frac = 0.0
-            self._play_clock.start()          # anchor the wall clock
+            self._play_clock.start()  # anchor the wall clock
             self._play_timer.start()
         else:
             self._play_btn.setIcon(_si(QStyle.StandardPixmap.SP_MediaPlay))
@@ -1139,9 +1254,7 @@ class ReconTab(QWidget):
         SP = QStyle.StandardPixmap
         self._play_btn.blockSignals(True)
         self._play_btn.setChecked(playing)
-        self._play_btn.setIcon(
-            _si(SP.SP_MediaPause) if playing else _si(SP.SP_MediaPlay)
-        )
+        self._play_btn.setIcon(_si(SP.SP_MediaPause) if playing else _si(SP.SP_MediaPlay))
         self._play_btn.blockSignals(False)
 
     def _on_prev_frame(self) -> None:
