@@ -1,8 +1,8 @@
 """
-Live capture tab — FLIR cameras.
+Live capture tab — FLIR cameras or simulator fallback.
 
 The tab guides the user through setup:
-  Step 1 (SDK missing)    → installation instructions
+  Step 1 (SDK missing)    → simulator preview + installation instructions
   Step 2 (SDK found)      → connect cameras + wiring diagram + Detect button
   Step 3 (2+ cams found)  → assign left/right serials, pick primary, configure sync
   Streaming               → Start Preview, Start/Stop Recording
@@ -528,7 +528,8 @@ class CaptureTab(QWidget):
             "5. Install the SDK runtime first, then the wheel:<br>"
             "&nbsp;&nbsp;<tt>pip install spinnaker_python-4.x.x.x-cp310-...-win_amd64.whl</tt><br><br>"
             "6. Restart BatPose<br><br>"
-            "<i>Until then, live capture is unavailable.</i>"
+            "<i>Until then, Start Preview uses a synthetic stereo simulator so "
+            "recording and UI workflows remain testable.</i>"
         )
         step1_text.setWordWrap(True)
         step1_text.setTextFormat(Qt.TextFormat.RichText)
@@ -1171,11 +1172,13 @@ class CaptureTab(QWidget):
         if _PYSPIN_AVAILABLE:
             self._sdk_label.setText(_status_html("✓ installed", "#2ecc71"))
         else:
-            self._sdk_label.setText(_status_html("✗ not installed", "#e74c3c"))
+            self._sdk_label.setText(_status_html("not installed - simulator available", "#e67e22"))
 
         # Camera count
         n = len(self._detected_serials)
-        if n == 0:
+        if not _PYSPIN_AVAILABLE:
+            self._cam_label.setText(_status_html("simulated stereo pair", "#2ecc71"))
+        elif n == 0:
             self._cam_label.setText(_status_html("none detected — click Detect", "#e67e22"))
         elif n == 1:
             self._cam_label.setText(_status_html("1 found (need at least 2)", "#e67e22"))
@@ -1183,7 +1186,9 @@ class CaptureTab(QWidget):
             self._cam_label.setText(_status_html(f"{n} detected", "#2ecc71"))
 
         # Sync status
-        if n < 2:
+        if not _PYSPIN_AVAILABLE:
+            self._sync_label.setText(_status_html("simulated timestamps", "#2ecc71"))
+        elif n < 2:
             self._sync_label.setText(_status_html("— need 2 cameras", "#888888"))
         elif self._sync_check.isChecked():
             primary = "left" if self._primary_left.isChecked() else "right"
@@ -1196,14 +1201,14 @@ class CaptureTab(QWidget):
         # Show/hide steps
         self._step1.setVisible(not _PYSPIN_AVAILABLE)
         self._step2.setVisible(_PYSPIN_AVAILABLE)
-        self._step3.setVisible(_PYSPIN_AVAILABLE and n >= 2)
+        self._step3.setVisible((not _PYSPIN_AVAILABLE) or n >= 2)
 
         # Enable Start Preview only when ready
-        can_start = self._worker is None and _PYSPIN_AVAILABLE and n >= 2
+        can_start = self._worker is None and ((not _PYSPIN_AVAILABLE) or n >= 2)
         self._start_btn.setEnabled(can_start)
         if not can_start and self._worker is None:
             if not _PYSPIN_AVAILABLE:
-                self._status_label.setText("Install PySpin to enable FLIR cameras.")
+                self._status_label.setText("Simulator ready. Install PySpin for FLIR cameras.")
             elif n < 2:
                 self._status_label.setText("Detect at least 2 cameras to start.")
 
@@ -1296,7 +1301,7 @@ class CaptureTab(QWidget):
         # The camera firmware enforces the hard limit itself; this warning
         # catches configurations that leave almost no headroom for the
         # hardware trigger handshake on the secondary camera.
-        if self._sync_check.isChecked():
+        if _PYSPIN_AVAILABLE and self._sync_check.isChecked():
             fps = self._fps_spin.value()
             exposure_us = self._exposure_spin.value()
             frame_period_us = 1_000_000.0 / fps
@@ -3142,6 +3147,11 @@ class CaptureTab(QWidget):
     # ------------------------------------------------------------------
 
     def _build_source(self):
+        if not _PYSPIN_AVAILABLE:
+            from app.capture import SimulatorCapture
+
+            return SimulatorCapture(fps=self._fps_spin.value())
+
         serial_l = self._left_combo.currentText().strip() or None
         serial_r = self._right_combo.currentText().strip() or None
         if serial_l and serial_r and serial_l == serial_r:

@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from app.console import console_safe
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -53,6 +55,7 @@ def _make_backend(args: argparse.Namespace):
 def _progress(pct: int, msg: str) -> None:
     # ASCII-only: Windows consoles are often cp1250 and block characters
     # crash plain print there.
+    msg = console_safe(msg, sys.stdout)
     bar_len = 30
     filled = int(bar_len * pct / 100)
     bar = "#" * filled + "-" * (bar_len - filled)
@@ -83,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             save_pose2d(kps, conf, meta, out_path)
             print(f"\n  -> saved {out_path}  shape={kps.shape}  fps={meta['fps']:.1f}")
         except Exception as e:
-            print(f"\n\nError: {e}", file=sys.stderr)
+            print(f"\n\nError: {console_safe(e, sys.stderr)}", file=sys.stderr)
             return 1
         finally:
             backend.close()

@@ -97,8 +97,9 @@ The Spinnaker / PySpin wheel can't be redistributed via PyPI, so install it from
 uv pip install external/spinnaker_python-*.whl   # re-run after any `uv sync`
 ```
 
-No SDK or no cameras? The Live Capture tab stays disabled, but the full **offline** pipeline
-(calibrate → 2D pose → 3D reconstruction → analysis) works on recorded videos.
+No SDK or no cameras? The Live Capture tab falls back to a synthetic stereo simulator for
+preview/recording workflow tests, and the full **offline** pipeline (calibrate → 2D pose →
+3D reconstruction → analysis) works on recorded videos.
 
 ## 🛠️ Development
 

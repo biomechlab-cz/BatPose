@@ -177,6 +177,17 @@ with FlirCapture(serial_left="12345678", serial_right="87654321") as cap:
         # frame.frame_left, frame.frame_right, frame.timestamp
 ```
 
+If PySpin is not installed, the GUI's Live Capture tab uses the synthetic simulator
+automatically. You can also exercise the capture interface directly:
+
+```python
+from app.capture import SimulatorCapture
+
+with SimulatorCapture(fps=30.0) as cap:
+    frame = cap.read()
+    # frame.frame_left, frame.frame_right, frame.timestamp
+```
+
 ---
 
 ## Caching

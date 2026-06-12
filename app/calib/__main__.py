@@ -5,6 +5,18 @@ from __future__ import annotations
 import argparse
 import sys
 
+from app.console import console_safe
+
+
+def _progress(pct: int, msg: str) -> None:
+    # ASCII-only: Windows consoles are often cp1250 and block characters
+    # crash plain print there.
+    msg = console_safe(msg, sys.stdout)
+    bar_len = 30
+    filled = int(bar_len * pct / 100)
+    bar = "#" * filled + "-" * (bar_len - filled)
+    print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -78,14 +90,6 @@ def main(argv: list[str] | None = None) -> int:
             "square_size": args.square_size,
         }
 
-    def progress(pct: int, msg: str) -> None:
-        # ASCII-only: Windows consoles are often cp1250 and block characters
-        # crash plain print there.
-        bar_len = 30
-        filled = int(bar_len * pct / 100)
-        bar = "#" * filled + "-" * (bar_len - filled)
-        print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
-
     print(f"Calibrating stereo pair: {args.left!r} + {args.right!r}")
     print(f"Board: {board_cfg}")
     print(f"Lens:  {args.lens}")
@@ -104,12 +108,12 @@ def main(argv: list[str] | None = None) -> int:
             max_frames=args.max_frames,
             sample_every=args.sample_every,
             min_coverage=args.min_coverage,
-            progress_cb=progress,
+            progress_cb=_progress,
             intrinsics_flags=cv2.CALIB_RATIONAL_MODEL if args.lens == "wide-angle" else 0,
             lens_model="fisheye" if args.lens == "fisheye" else "standard",
         )
     except Exception as e:
-        print(f"\n\nError: {e}", file=sys.stderr)
+        print(f"\n\nError: {console_safe(e, sys.stderr)}", file=sys.stderr)
         return 1
 
     if out is None:

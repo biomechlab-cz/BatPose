@@ -8,10 +8,22 @@ Covers three review findings:
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-_APP = Path(__file__).parents[2] / "app"
+
+class _Cp1250Stream:
+    encoding = "cp1250"
+
+    def __init__(self):
+        self.parts: list[str] = []
+
+    def write(self, text: str) -> int:
+        text.encode(self.encoding)
+        self.parts.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
 
 
 class TestPose2dCliImageMode:
@@ -49,13 +61,24 @@ class TestRecon3dCliDefaults:
 class TestCliStdoutAscii:
     """Block characters / arrows crash plain print on cp1250 Windows consoles."""
 
-    def test_cli_mains_free_of_console_breaking_chars(self):
-        for mod in ("calib", "pose2d", "recon3d"):
-            text = (_APP / mod / "__main__.py").read_text(encoding="utf-8")
-            for ch in ("█", "░", "→", "⚠"):  # block, shade, arrow, warning
-                assert ch not in text, f"app/{mod}/__main__.py contains {ch!r}"
+    def test_console_safe_replaces_unencodable_chars(self):
+        from app.console import console_safe
 
-    def test_pipeline_progress_messages_cp1250_safe(self):
-        """pipeline.py progress strings reach the CLI printers — must encode."""
-        text = (_APP / "recon3d" / "pipeline.py").read_text(encoding="utf-8")
-        assert "⚠" not in text  # the old warning sign crashed cp1250 print
+        stream = _Cp1250Stream()
+        safe = console_safe("⚠ ≥ → … — ×", stream)
+        safe.encode(stream.encoding)
+
+    def test_progress_printers_accept_unicode_messages_on_cp1250(self, monkeypatch):
+        """Progress messages from pipelines reach these printers; they must not crash."""
+        import sys
+
+        stream = _Cp1250Stream()
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        from app.calib.__main__ import _progress as calib_progress
+        from app.pose2d.__main__ import _progress as pose_progress
+        from app.recon3d.__main__ import _progress as recon_progress
+
+        calib_progress(5, "⚠ Warning: recommend ≥20 frames — retry…")
+        pose_progress(10, "Loading → detecting…")
+        recon_progress(20, "WARNING: left/right are paired by detection ORDER → unreliable…")

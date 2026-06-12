@@ -3,7 +3,7 @@ FLIR camera capture via PySpin (Spinnaker SDK).
 
 This module is imported only if PySpin is available.
 If the FLIR SDK is not installed, the import will fail gracefully and
-VideoSimulator will be used instead (see app/capture/__init__.py).
+SimulatorCapture remains available (see app/capture/__init__.py).
 
 Install notes:
 - Download Spinnaker SDK from FLIR's website.

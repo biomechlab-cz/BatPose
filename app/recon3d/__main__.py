@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+from app.console import console_safe
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -92,6 +94,7 @@ def _write_csv(
 def _progress(pct: int, msg: str) -> None:
     # ASCII-only: Windows consoles are often cp1250 and block characters
     # crash plain print there.
+    msg = console_safe(msg, sys.stdout)
     bar_len = 30
     filled = int(bar_len * pct / 100)
     bar = "#" * filled + "-" * (bar_len - filled)
@@ -137,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             progress_cb=_progress,
         )
     except Exception as e:
-        print(f"\n\nError: {e}", file=sys.stderr)
+        print(f"\n\nError: {console_safe(e, sys.stderr)}", file=sys.stderr)
         return 1
 
     if result is None:
@@ -152,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     conf3d = d["conf3d"]
     fps = float(meta.get("fps", 30.0))
     print(f"\n\nDone.  Output: {result}")
-    print(f"  Shape: joints3d={joints3d.shape}  (T×P×J×3)")
+    print(f"  Shape: joints3d={joints3d.shape}  (T x P x J x 3)")
     print(f"  FPS:   {fps:.1f}")
 
     if args.export_csv:
