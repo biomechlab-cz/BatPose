@@ -186,3 +186,56 @@ class TestSmoothTrajectory:
         traj = np.ones((10, 3), dtype=np.float32)
         with pytest.raises(ValueError, match="d_cutoff must be positive"):
             smooth_trajectory(traj, fps=30.0, d_cutoff=-1.0)
+
+
+class TestValidMaskSmoothing:
+    """Rejected (zeroed) joints must not be fed into the filter as real samples.
+
+    The offline pipeline zeroes invalid joints; smoothing them unmasked drags
+    the filter state toward the origin across tracking gaps.  With valid=…,
+    gaps hold the last smoothed value (matching live tracking) and the filter
+    state is untouched.
+    """
+
+    def _gappy(self, T: int = 60, lo: int = 20, hi: int = 40):
+        traj = np.ones((T, 1), dtype=np.float32)
+        valid = np.ones(T, dtype=bool)
+        traj[lo:hi] = 0.0  # what the pipeline stores for rejected joints
+        valid[lo:hi] = False
+        return traj, valid
+
+    def test_gap_holds_last_value(self):
+        traj, valid = self._gappy()
+        out = smooth_trajectory(traj, fps=30.0, min_cutoff=1.0, beta=0.5, valid=valid)
+        np.testing.assert_allclose(out[19], 1.0, atol=1e-4)
+        np.testing.assert_allclose(out[20:40], float(out[19, 0]))  # held, not dragged to 0
+        np.testing.assert_allclose(out[45:], 1.0, atol=1e-3)  # clean recovery
+
+    def test_unmasked_zeros_drag_toward_origin(self):
+        """Documents the bug the mask fixes — same data WITHOUT the mask decays."""
+        traj, _ = self._gappy()
+        out = smooth_trajectory(traj, fps=30.0, min_cutoff=1.0, beta=0.5)
+        assert out[35, 0] < 0.5  # filter pulled toward the fake zero samples
+
+    def test_leading_invalid_passthrough(self):
+        traj = np.ones((20, 1), dtype=np.float32)
+        traj[:5] = 0.0
+        valid = np.ones(20, dtype=bool)
+        valid[:5] = False
+        out = smooth_trajectory(traj, fps=30.0, valid=valid)
+        np.testing.assert_allclose(out[:5], 0.0)  # nothing to hold yet
+        np.testing.assert_allclose(out[5], 1.0, atol=1e-6)  # first real sample
+
+    def test_no_mask_is_backward_compatible(self):
+        traj = np.random.default_rng(0).random((30, 3)).astype(np.float32)
+        np.testing.assert_array_equal(
+            smooth_trajectory(traj, fps=30.0),
+            smooth_trajectory(traj, fps=30.0, valid=np.ones(30, dtype=bool)),
+        )
+
+    def test_mask_length_mismatch_raises(self):
+        import pytest
+
+        traj = np.ones((10, 3), dtype=np.float32)
+        with pytest.raises(ValueError, match="valid mask length"):
+            smooth_trajectory(traj, fps=30.0, valid=np.ones(7, dtype=bool))

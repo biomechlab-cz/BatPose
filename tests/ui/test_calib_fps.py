@@ -123,3 +123,62 @@ class TestCalibFpsOverride:
         assert tab._fps_spin.value() == 50.0
         assert tab._calib_fps_active is False
         assert tab._precalib_fps is None
+
+    def test_entering_live_pose_restores_fps(self, tab):
+        """Leaving calibration mode via the Live Pose button must restore the
+        fps too — it used to bypass the restore, leaving the stream stuck at
+        the ~20 fps calibration rate ('live pose is slower')."""
+        tab._fps_spin.setValue(CaptureTab._CALIB_FPS)
+        tab._calib_fps_active = True
+        tab._precalib_fps = 50.0
+        tab._worker = object()
+        tab._calib_mode_btn.setChecked(True)
+        calls = _stub_restart(tab)
+
+        tab._on_pose_mode_clicked(True)  # open Live Pose (closes calib mode)
+
+        assert calls == [50.0]
+        assert tab._calib_fps_active is False
+        assert tab._precalib_fps is None
+        assert not tab._calib_mode_btn.isChecked()
+
+
+class TestCalibCloseConfirmation:
+    """Closing Calibration Mode only warns about captures NOT yet consumed by a
+    successful 'Run Calibration' — after a run (e.g. run → set coordinate
+    system → close) it just closes."""
+
+    def _add_captures(self, tab, n: int = 4) -> None:
+        tab._calib_left_dets.extend(object() for _ in range(n))
+        tab._calib_right_dets.extend(object() for _ in range(n))
+        tab._calib_pairs.extend(object() for _ in range(n))
+
+    def test_no_confirm_after_successful_run(self, tab, monkeypatch):
+        self._add_captures(tab)
+        tab._calib_run_done = True  # set by _on_calib_finished
+        seen = _patch_question(monkeypatch, QMessageBox.StandardButton.No)
+
+        tab._on_calib_close_clicked()
+
+        assert seen["shown"] == 0  # no nag
+        assert not tab._calib_mode_btn.isChecked()  # closed
+
+    def test_confirm_still_shown_for_unused_captures(self, tab, monkeypatch):
+        self._add_captures(tab)
+        tab._calib_run_done = False
+        seen = _patch_question(monkeypatch, QMessageBox.StandardButton.Yes)
+
+        tab._on_calib_close_clicked()
+
+        assert seen["shown"] == 1
+
+    def test_clear_all_resets_run_done(self, tab, monkeypatch):
+        """Clearing the captures invalidates the 'already calibrated' state."""
+        self._add_captures(tab)
+        tab._calib_run_done = True
+        _patch_question(monkeypatch, QMessageBox.StandardButton.Yes)
+
+        tab._on_calib_clear()
+
+        assert tab._calib_run_done is False
+        assert len(tab._calib_pairs) == 0

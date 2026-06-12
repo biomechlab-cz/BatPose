@@ -93,7 +93,7 @@ def reconstruct3d(
         )
         warnings.warn(_msg, UserWarning, stacklevel=2)
         if progress_cb:
-            progress_cb(5, f"⚠ {_msg}")
+            progress_cb(5, f"WARNING: {_msg}")
     T_frames = min(T_frames, T_r)
     kps_left = kps_left[:T_frames]
     kps_right = kps_right[:T_frames]
@@ -112,12 +112,28 @@ def reconstruct3d(
         )
         _warnings.warn(_pmsg, UserWarning, stacklevel=2)
         if progress_cb:
-            progress_cb(5, f"⚠ {_pmsg}")
+            progress_cb(5, f"WARNING: {_pmsg}")
         P = min(P, P_r)
         kps_left = kps_left[:, :P]
         kps_right = kps_right[:, :P]
         conf_left = conf_left[:, :P]
         conf_right = conf_right[:, :P]
+
+    # Multi-person honesty: there is NO cross-view identity matching — person
+    # slot p in the LEFT view is paired with slot p in the RIGHT view purely by
+    # detection order.  Reliable for one person; with several people crossing
+    # or detected in different orders the wrong bodies get triangulated.
+    if P > 1:
+        import warnings as _w
+
+        _mp_msg = (
+            f"{P} person slots: left/right are paired by detection ORDER (no "
+            "identity matching). Results are unreliable when people overlap or "
+            "cross between views."
+        )
+        _w.warn(_mp_msg, UserWarning, stacklevel=2)
+        if progress_cb:
+            progress_cb(6, f"WARNING: {_mp_msg}")
 
     # Projection matrices in normalized image coordinates
     # Camera 1: P1 = [I | 0]
@@ -185,11 +201,17 @@ def reconstruct3d(
     else:
         if progress_cb:
             progress_cb(85, "Applying temporal smoothing…")
-        # Temporal smoothing per person × joint × coordinate
+        # Temporal smoothing per person × joint × coordinate.  Rejected joints
+        # were zeroed above — feeding those zeros into the filter as if they
+        # were real samples drags the state toward the origin across tracking
+        # gaps, so they are masked out (the filter holds the last smoothed
+        # value, matching the live-tracking behaviour).
         for p in range(P):
             for j in range(J):
                 traj = joints3d[:, p, j, :]  # [T, 3]
-                joints3d[:, p, j, :] = smooth_trajectory(traj, fps, min_cutoff, beta, d_cutoff)
+                joints3d[:, p, j, :] = smooth_trajectory(
+                    traj, fps, min_cutoff, beta, d_cutoff, valid=conf3d[:, p, j] > 0
+                )
 
     # Express joints in the floor-board world frame if calibration defines one.
     # Otherwise leave them in the camera-1 OpenCV frame (consumers then apply the
@@ -220,7 +242,9 @@ def reconstruct3d(
         "image_size": meta_left.get("image_size", [0, 0]),
         "calibration_file": str(calib_path),
         "smoothing": "none" if no_smooth else "oneeuro",
-        "smooth_params": {} if no_smooth else {"min_cutoff": min_cutoff, "beta": beta, "d_cutoff": d_cutoff},
+        "smooth_params": {}
+        if no_smooth
+        else {"min_cutoff": min_cutoff, "beta": beta, "d_cutoff": d_cutoff},
         # "world" → joints3d already in the Z-up floor frame (no swap downstream);
         # "opencv" → camera-1 frame (consumers apply the X,Z,-Y swap, as before).
         "coordinate_frame": coordinate_frame,

@@ -36,23 +36,23 @@ _HAS_FIXTURES = _CALIB.exists() and _P2D_L.exists() and _P2D_R.exists()
 
 # COCO-17 joint names in index order — used for semantic checks
 COCO17 = [
-    "nose",           # 0
-    "left_eye",       # 1
-    "right_eye",      # 2
-    "left_ear",       # 3
-    "right_ear",      # 4
+    "nose",  # 0
+    "left_eye",  # 1
+    "right_eye",  # 2
+    "left_ear",  # 3
+    "right_ear",  # 4
     "left_shoulder",  # 5
-    "right_shoulder", # 6
-    "left_elbow",     # 7
-    "right_elbow",    # 8
-    "left_wrist",     # 9
-    "right_wrist",    # 10
-    "left_hip",       # 11
-    "right_hip",      # 12
-    "left_knee",      # 13
-    "right_knee",     # 14
-    "left_ankle",     # 15
-    "right_ankle",    # 16
+    "right_shoulder",  # 6
+    "left_elbow",  # 7
+    "right_elbow",  # 8
+    "left_wrist",  # 9
+    "right_wrist",  # 10
+    "left_hip",  # 11
+    "right_hip",  # 12
+    "left_knee",  # 13
+    "right_knee",  # 14
+    "left_ankle",  # 15
+    "right_ankle",  # 16
 ]
 
 # Joint pairs used as a bilateral *labeling-swap* guard.
@@ -75,6 +75,7 @@ _BILATERAL_PAIRS = _RELIABLE_PAIRS
 def _run_reconstruction(tmp_path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     """Run the full pipeline on sample fixtures and return (joints3d, conf3d, meta)."""
     from app.recon3d.pipeline import reconstruct3d
+
     out = str(tmp_path / "pose3d.npz")
     reconstruct3d(
         calib_path=str(_CALIB),
@@ -87,6 +88,7 @@ def _run_reconstruction(tmp_path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
 
 
 # ── Coordinate units and reference frame ────────────────────────────────────
+
 
 @pytest.mark.skipif(not _HAS_FIXTURES, reason="Sample fixtures required")
 class TestCoordinateUnits:
@@ -115,13 +117,12 @@ class TestCoordinateUnits:
             detected_y = joints3d[t, conf3d[t] > 0.3, 1]
             if len(detected_y) >= 4:
                 height_m = float(detected_y.max() - detected_y.min())
-                assert height_m < 2.5, (
-                    f"Frame {t}: vertical extent {height_m:.2f} m exceeds 2.5 m"
-                )
+                assert height_m < 2.5, f"Frame {t}: vertical extent {height_m:.2f} m exceeds 2.5 m"
 
     def test_csv_coordinates_are_metres(self, recon, tmp_path):
         """Exported CSV j*_x/y/z values must be in metres (not pixels, not mm)."""
         from app.recon3d.__main__ import _write_csv
+
         joints3d, conf3d, meta = recon
         fps = float(meta.get("fps", 30.0))
         csv_path = str(tmp_path / "export.csv")
@@ -143,6 +144,7 @@ class TestCoordinateUnits:
 
 
 # ── Temporal plausibility ────────────────────────────────────────────────────
+
 
 @pytest.mark.skipif(not _HAS_FIXTURES, reason="Sample fixtures required")
 class TestTemporalPlausibility:
@@ -173,8 +175,8 @@ class TestTemporalPlausibility:
         max_speed = 0.0
         for t in range(1, T):
             both_detected = (conf3d[t] > 0) & (conf3d[t - 1] > 0)
-            disp = joints3d[t] - joints3d[t - 1]   # [P, 17, 3]
-            speed = np.linalg.norm(disp, axis=-1)   # [P, 17]
+            disp = joints3d[t] - joints3d[t - 1]  # [P, 17, 3]
+            speed = np.linalg.norm(disp, axis=-1)  # [P, 17]
             speed_ms = speed[both_detected] * fps
             if len(speed_ms):
                 max_speed = max(max_speed, float(speed_ms.max()))
@@ -191,8 +193,8 @@ class TestTemporalPlausibility:
         """
         joints3d, conf3d, _ = recon
         # Frame-to-frame L2 displacement of nose (joint 0, person 0)
-        person_0 = joints3d[:, 0, 0, :]        # [T, 3]
-        conf_0 = conf3d[:, 0, 0]               # [T]
+        person_0 = joints3d[:, 0, 0, :]  # [T, 3]
+        conf_0 = conf3d[:, 0, 0]  # [T]
         detected = conf_0 > 0.3
         if detected.sum() < 10:
             pytest.skip("Too few detected nose frames to compute variance")
@@ -205,6 +207,7 @@ class TestTemporalPlausibility:
 
 
 # ── Confidence-based quality filtering ──────────────────────────────────────
+
 
 @pytest.mark.skipif(not _HAS_FIXTURES, reason="Sample fixtures required")
 class TestConfidenceFiltering:
@@ -221,9 +224,7 @@ class TestConfidenceFiltering:
         indicate a division-by-zero or failed triangulation slipping through.
         """
         joints3d, _, _ = recon
-        assert np.all(np.isfinite(joints3d)), (
-            "Pipeline produced NaN or inf in joints3d"
-        )
+        assert np.all(np.isfinite(joints3d)), "Pipeline produced NaN or inf in joints3d"
 
     def test_high_conf_joints_not_all_zero(self, recon):
         """At least some high-confidence joints must have non-trivial 3D position."""
@@ -235,6 +236,7 @@ class TestConfidenceFiltering:
 
 
 # ── COCO-17 joint labeling ───────────────────────────────────────────────────
+
 
 @pytest.mark.skipif(not _HAS_FIXTURES, reason="Sample fixtures required")
 class TestJointLabeling:
@@ -270,6 +272,7 @@ class TestJointLabeling:
 
     def test_csv_has_all_17_joint_columns(self, recon, tmp_path):
         from app.recon3d.__main__ import _write_csv
+
         joints3d, conf3d, meta = recon
         csv_path = str(tmp_path / "export.csv")
         _write_csv(csv_path, joints3d, conf3d, float(meta.get("fps", 30.0)))
@@ -282,7 +285,9 @@ class TestJointLabeling:
 
     def test_csv_metadata_json_has_expected_keys(self, recon, tmp_path):
         import json
+
         from app.recon3d.__main__ import _write_csv
+
         joints3d, conf3d, meta = recon
         csv_path = str(tmp_path / "bio_export.csv")
         _write_csv(csv_path, joints3d, conf3d, float(meta.get("fps", 30.0)))
@@ -296,6 +301,7 @@ class TestJointLabeling:
 
 
 # ── Manual expert protocols ──────────────────────────────────────────────────
+
 
 @pytest.mark.manual
 class TestManualBiomechExpert:

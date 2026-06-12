@@ -321,7 +321,10 @@ class Pose2DPreview(QWidget):
             self._worker = _PreviewDecodeWorker(
                 video_left if has_left else None,
                 video_right if has_right else None,
-                kps_l, conf_l, kps_r, conf_r,
+                kps_l,
+                conf_l,
+                kps_r,
+                conf_r,
                 parent=self,
             )
             self._worker.ready.connect(self._on_frame_ready)

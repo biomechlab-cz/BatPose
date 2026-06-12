@@ -197,6 +197,29 @@ class CalibTab(QWidget):
         self._board_stack.addWidget(chess_widget)
 
         board_layout.addWidget(self._board_stack)
+
+        # Lens / distortion model — must match the physical lens or the saved
+        # calibration silently poisons reconstruction (a fisheye rig calibrated
+        # as pinhole undistorts to garbage rays).
+        lens_row = QHBoxLayout()
+        lens_row.addWidget(QLabel("Lens:"))
+        self._lens_combo = QComboBox()
+        self._lens_combo.addItems(
+            [
+                "Standard  (normal lenses)",
+                "Wide-angle  (rational model)",
+                "Fisheye  (≥ 150° FOV)",
+            ]
+        )
+        self._lens_combo.setToolTip(
+            "Standard — 5 distortion coefficients, best for lenses with ≤ 90° FOV.\n"
+            "Wide-angle — 8 coefficients (rational model), use for 90–150° FOV.\n"
+            "Fisheye — OpenCV fisheye model (θ-based), use for > 150° FOV.\n\n"
+            "If RMS > 1.5 px your lens is probably wider than the selected model allows."
+        )
+        self._lens_combo.setCurrentIndex(2)  # default Fisheye (the deployed rig)
+        lens_row.addWidget(self._lens_combo)
+        board_layout.addLayout(lens_row)
         ctrl_layout.addWidget(board_group)
 
         # Frame selection options
@@ -382,6 +405,7 @@ class CalibTab(QWidget):
             output_path=out,
             max_frames=self._max_frames.value(),
             sample_every=self._sample_every.value(),
+            lens_model=self._lens_combo.currentIndex(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)

@@ -70,12 +70,18 @@ python -m app.calib \
   --left  /path/to/left_calib.mp4 \
   --right /path/to/right_calib.mp4 \
   --board charuco \
-  --squares-x 7 --squares-y 5 \
-  --square-size 0.04 --marker-size 0.03 \
+  --squares-x 5 --squares-y 7 \
+  --square-size 0.04 --marker-size 0.024 \
+  --aruco-dict DICT_6X6_250 \
+  --lens fisheye \
   --out calibration.yml
 ```
 
-Output: `calibration.yml` containing K1, D1, K2, D2, R, T and quality metrics.
+`--lens` selects the distortion model (`standard` ≤ 90° FOV, `wide-angle` 90–150°,
+`fisheye` > 150°) and **must match the physical lens** — a fisheye rig calibrated
+with the standard model produces a calibration that silently breaks 3D reconstruction.
+
+Output: `calibration.yml` containing K1, D1, K2, D2, R, T, the lens model and quality metrics.
 
 ---
 
@@ -94,6 +100,11 @@ python -m app.pose2d \
 
 **First run note:** MediaPipe will download the `pose_landmarker_full.task` model (~28 MB)
 to `~/.cache/BatPose/` on first use.
+
+**Multi-person caveat:** with `--num-poses` > 1 the left/right person slots are paired by
+detection ORDER — there is no cross-view identity matching. Reliable for a single person;
+when several people overlap or cross between views, identities can swap and the wrong
+bodies get triangulated.
 
 Output files:
 - `pose2d_left.npz`  — keypoints `[T, P, 17, 2]` + conf `[T, P, 17]`
@@ -122,8 +133,8 @@ Optional flags:
 |------|---------|-------------|
 | `--min-conf` | 0.3 | Minimum 2D confidence to accept a joint |
 | `--max-reproj-err` | 20.0 | Max reprojection error (px) before marking joint invalid |
-| `--min-cutoff` | 0.5 | OneEuro min_cutoff (Hz) — lower = smoother |
-| `--beta` | 0.05 | OneEuro beta — higher = less lag on fast motion |
+| `--min-cutoff` | 1.0 | OneEuro min_cutoff (Hz) — lower = smoother (matches the GUI default) |
+| `--beta` | 0.5 | OneEuro beta — higher = less lag on fast motion (matches the GUI default) |
 
 Output: `pose3d.npz` with `joints3d [T, P, 17, 3]`, `conf3d`, `repro_err`, `meta`.
 

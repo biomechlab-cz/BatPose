@@ -13,7 +13,6 @@ from app.biomech import (
     compute_stats,
 )
 
-
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
@@ -40,21 +39,25 @@ def _full_conf() -> np.ndarray:
 class TestAngleComputation:
     def test_known_90_degree_angle(self):
         """Right angle at the vertex must produce 90°."""
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),  # A = LHip at +x
-            13: (0.0, 0.0, 0.0),  # B = LKnee at origin (vertex)
-            15: (0.0, 1.0, 0.0),  # C = LAnkle at +y
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),  # A = LHip at +x
+                13: (0.0, 0.0, 0.0),  # B = LKnee at origin (vertex)
+                15: (0.0, 1.0, 0.0),  # C = LAnkle at +y
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, 0] == pytest.approx(90.0, abs=1e-3)
 
     def test_known_180_degree_angle(self):
         """Three collinear points (vertex in the middle) give 180°."""
-        pose = _make_pose({
-            11: (-1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (1.0, 0.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (-1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (1.0, 0.0, 0.0),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, 0] == pytest.approx(180.0, abs=1e-3)
 
@@ -62,21 +65,25 @@ class TestAngleComputation:
         """Equilateral-triangle vertex angle is 60°."""
         # A, B, C as 3 vertices of an equilateral triangle in the XY plane;
         # interior angle at any vertex is 60°.
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.5, np.sqrt(3) / 2, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.5, np.sqrt(3) / 2, 0.0),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, 0] == pytest.approx(60.0, abs=1e-3)
 
     def test_zero_conf_on_flanking_joint_yields_nan(self):
         """Conf=0 on the proximal joint must produce NaN."""
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.0, 1.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.0, 1.0, 0.0),
+            }
+        )
         conf = _full_conf()
         conf[0, 0, 11] = 0.0  # zero out LHip
         out = compute_joint_angles(pose, conf)
@@ -84,11 +91,13 @@ class TestAngleComputation:
 
     def test_zero_conf_on_vertex_yields_nan(self):
         """Conf=0 on the vertex joint must produce NaN."""
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.0, 1.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.0, 1.0, 0.0),
+            }
+        )
         conf = _full_conf()
         conf[0, 0, 13] = 0.0  # zero out LKnee (the vertex)
         out = compute_joint_angles(pose, conf)
@@ -96,11 +105,13 @@ class TestAngleComputation:
 
     def test_zero_conf_on_distal_yields_nan(self):
         """Conf=0 on the distal joint must produce NaN."""
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.0, 1.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.0, 1.0, 0.0),
+            }
+        )
         conf = _full_conf()
         conf[0, 0, 15] = 0.0  # zero out LAnkle
         out = compute_joint_angles(pose, conf)
@@ -108,11 +119,13 @@ class TestAngleComputation:
 
     def test_all_positive_conf_no_nan(self):
         """If all flanking joints have positive conf, output is finite."""
-        pose = _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.0, 1.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.0, 1.0, 0.0),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert np.isfinite(out[0, 0, 0])
 
@@ -121,11 +134,13 @@ class TestConfidenceThreshold:
     """min_conf parameter filters keypoints below the threshold."""
 
     def _knee_pose(self):
-        return _make_pose({
-            11: (1.0, 0.0, 0.0),
-            13: (0.0, 0.0, 0.0),
-            15: (0.0, 1.0, 0.0),
-        })
+        return _make_pose(
+            {
+                11: (1.0, 0.0, 0.0),
+                13: (0.0, 0.0, 0.0),
+                15: (0.0, 1.0, 0.0),
+            }
+        )
 
     def test_default_min_conf_keeps_low_confidence(self):
         """Default min_conf=0 accepts any non-zero confidence (90° still computed)."""
@@ -206,23 +221,23 @@ def _synthetic_standing_pose() -> np.ndarray:
     All limbs straight (extended), so every flexion angle is ~180°.
     """
     positions = {
-        0: (0.0, 0.05, 1.70),    # nose
+        0: (0.0, 0.05, 1.70),  # nose
         1: (-0.03, 0.05, 1.72),  # L eye
-        2: (0.03, 0.05, 1.72),   # R eye
-        3: (-0.08, 0.0, 1.70),   # L ear
-        4: (0.08, 0.0, 1.70),    # R ear
-        5: (-0.18, 0.0, 1.45),   # L shoulder
-        6: (0.18, 0.0, 1.45),    # R shoulder
-        7: (-0.18, 0.0, 1.15),   # L elbow
-        8: (0.18, 0.0, 1.15),    # R elbow
-        9: (-0.18, 0.0, 0.85),   # L wrist
-        10: (0.18, 0.0, 0.85),   # R wrist
+        2: (0.03, 0.05, 1.72),  # R eye
+        3: (-0.08, 0.0, 1.70),  # L ear
+        4: (0.08, 0.0, 1.70),  # R ear
+        5: (-0.18, 0.0, 1.45),  # L shoulder
+        6: (0.18, 0.0, 1.45),  # R shoulder
+        7: (-0.18, 0.0, 1.15),  # L elbow
+        8: (0.18, 0.0, 1.15),  # R elbow
+        9: (-0.18, 0.0, 0.85),  # L wrist
+        10: (0.18, 0.0, 0.85),  # R wrist
         11: (-0.10, 0.0, 0.90),  # L hip
-        12: (0.10, 0.0, 0.90),   # R hip
+        12: (0.10, 0.0, 0.90),  # R hip
         13: (-0.10, 0.0, 0.50),  # L knee
-        14: (0.10, 0.0, 0.50),   # R knee
-        15: (-0.10, 0.0, 0.0),   # L ankle
-        16: (0.10, 0.0, 0.0),    # R ankle
+        14: (0.10, 0.0, 0.50),  # R knee
+        15: (-0.10, 0.0, 0.0),  # L ankle
+        16: (0.10, 0.0, 0.0),  # R ankle
     }
     return _make_pose(positions)
 
@@ -254,53 +269,59 @@ class TestSyntheticPose:
 
 
 def _trunk_index() -> int:
-    return next(
-        i for i, a in enumerate(ANGLE_DEFINITIONS) if a.name == "Trunk Inclination"
-    )
+    return next(i for i, a in enumerate(ANGLE_DEFINITIONS) if a.name == "Trunk Inclination")
 
 
 class TestTrunkInclination:
     def test_upright_trunk_is_zero(self):
         """A perfectly vertical trunk gives ~0°."""
-        pose = _make_pose({
-            5: (-0.18, 0.0, 1.5),   # L shoulder above L hip
-            6: (0.18, 0.0, 1.5),
-            11: (-0.10, 0.0, 0.9),
-            12: (0.10, 0.0, 0.9),
-        })
+        pose = _make_pose(
+            {
+                5: (-0.18, 0.0, 1.5),  # L shoulder above L hip
+                6: (0.18, 0.0, 1.5),
+                11: (-0.10, 0.0, 0.9),
+                12: (0.10, 0.0, 0.9),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, _trunk_index()] == pytest.approx(0.0, abs=1e-3)
 
     def test_horizontal_trunk_is_ninety(self):
         """A trunk lying flat along +Y gives ~90°."""
-        pose = _make_pose({
-            5: (-0.18, 0.6, 0.0),
-            6: (0.18, 0.6, 0.0),
-            11: (-0.10, 0.0, 0.0),
-            12: (0.10, 0.0, 0.0),
-        })
+        pose = _make_pose(
+            {
+                5: (-0.18, 0.6, 0.0),
+                6: (0.18, 0.6, 0.0),
+                11: (-0.10, 0.0, 0.0),
+                12: (0.10, 0.0, 0.0),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, _trunk_index()] == pytest.approx(90.0, abs=1e-3)
 
     def test_inverted_trunk_is_one_eighty(self):
         """An upside-down trunk (handstand) gives ~180°."""
-        pose = _make_pose({
-            5: (-0.18, 0.0, 0.0),
-            6: (0.18, 0.0, 0.0),
-            11: (-0.10, 0.0, 1.5),
-            12: (0.10, 0.0, 1.5),
-        })
+        pose = _make_pose(
+            {
+                5: (-0.18, 0.0, 0.0),
+                6: (0.18, 0.0, 0.0),
+                11: (-0.10, 0.0, 1.5),
+                12: (0.10, 0.0, 1.5),
+            }
+        )
         out = compute_joint_angles(pose, _full_conf())
         assert out[0, 0, _trunk_index()] == pytest.approx(180.0, abs=1e-3)
 
     def test_nan_when_hip_missing(self):
         """Any hip or shoulder with conf=0 must NaN-out the trunk angle."""
-        pose = _make_pose({
-            5: (-0.18, 0.0, 1.5),
-            6: (0.18, 0.0, 1.5),
-            11: (-0.10, 0.0, 0.9),
-            12: (0.10, 0.0, 0.9),
-        })
+        pose = _make_pose(
+            {
+                5: (-0.18, 0.0, 1.5),
+                6: (0.18, 0.0, 1.5),
+                11: (-0.10, 0.0, 0.9),
+                12: (0.10, 0.0, 0.9),
+            }
+        )
         conf = _full_conf()
         conf[0, 0, 12] = 0.0  # zero one of the hips
         out = compute_joint_angles(pose, conf)
@@ -318,9 +339,7 @@ class TestAngleDefinitions:
             if adef.indices is None:
                 continue
             for idx in adef.indices:
-                assert 0 <= idx <= 16, (
-                    f"angle {adef.name!r} has out-of-range index {idx}"
-                )
+                assert 0 <= idx <= 16, f"angle {adef.name!r} has out-of-range index {idx}"
 
     def test_names_are_unique(self):
         names = [a.name for a in ANGLE_DEFINITIONS]
@@ -348,9 +367,7 @@ class TestComputeStats:
         assert stats.rom_deg == 40.0
 
     def test_ignores_nan_frames(self):
-        angles = np.array(
-            [10.0, np.nan, 30.0, np.nan, 50.0], dtype=np.float32
-        ).reshape(5, 1, 1)
+        angles = np.array([10.0, np.nan, 30.0, np.nan, 50.0], dtype=np.float32).reshape(5, 1, 1)
         stats = compute_stats(angles, 0, 0)
         assert stats is not None
         assert stats.min_deg == 10.0

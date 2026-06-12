@@ -29,7 +29,12 @@ def _make_backend(args: argparse.Namespace):
     if args.backend == "mediapipe":
         from .mediapipe_backend import MediaPipeBackend
 
-        return MediaPipeBackend(num_poses=args.num_poses)
+        # IMAGE (stateless) mode for offline extraction — same as the GUI
+        # pipeline (Pose2DWorker): each frame is analysed independently, which
+        # avoids MediaPipe's internal temporal smoothing blurring fast-movement
+        # keypoints; temporal coherence is restored by the OneEuro filter in the
+        # 3D step.  VIDEO mode is reserved for live tracking (ADR-006).
+        return MediaPipeBackend(num_poses=args.num_poses, running_mode="image")
     elif args.backend == "rtmpose":
         try:
             from .rtmpose_backend import RTMPoseBackend
@@ -46,9 +51,11 @@ def _make_backend(args: argparse.Namespace):
 
 
 def _progress(pct: int, msg: str) -> None:
+    # ASCII-only: Windows consoles are often cp1250 and block characters
+    # crash plain print there.
     bar_len = 30
     filled = int(bar_len * pct / 100)
-    bar = "█" * filled + "░" * (bar_len - filled)
+    bar = "#" * filled + "-" * (bar_len - filled)
     print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
 
 
@@ -74,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             kps, conf, meta = process_video(video_path, backend, progress_cb=_progress)
             save_pose2d(kps, conf, meta, out_path)
-            print(f"\n  → saved {out_path}  shape={kps.shape}  fps={meta['fps']:.1f}")
+            print(f"\n  -> saved {out_path}  shape={kps.shape}  fps={meta['fps']:.1f}")
         except Exception as e:
             print(f"\n\nError: {e}", file=sys.stderr)
             return 1

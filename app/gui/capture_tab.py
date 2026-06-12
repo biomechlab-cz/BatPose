@@ -171,26 +171,6 @@ class _FullscreenPreview(QDialog):
         self._label.setPixmap(pix)
 
 
-_COCO17_NAMES = [
-    "nose",
-    "L-eye",
-    "R-eye",
-    "L-ear",
-    "R-ear",
-    "L-shoulder",
-    "R-shoulder",
-    "L-elbow",
-    "R-elbow",
-    "L-wrist",
-    "R-wrist",
-    "L-hip",
-    "R-hip",
-    "L-knee",
-    "R-knee",
-    "L-ankle",
-    "R-ankle",
-]
-
 try:
     import PySpin as _PySpin  # noqa: F401
 
@@ -298,6 +278,10 @@ class CaptureTab(QWidget):
         # original; _calib_fps_active flags that a restore is pending.
         self._calib_fps_active: bool = False
         self._precalib_fps: float | None = None
+        # True once "Run Calibration" succeeded for the CURRENT captures — the
+        # close-confirmation is then skipped (the captures served their purpose).
+        # Any new/cleared capture resets it.
+        self._calib_run_done: bool = False
         self._detector = None  # BoardDetector | None
         # Path of the calibration.yml saved this session (or found on open) —
         # gates the "Set coordinate system" button and is the file patched with
@@ -1756,15 +1740,21 @@ class CaptureTab(QWidget):
         self._apply_calib_open()
 
     def _on_calib_close_clicked(self) -> None:
-        """Close the calibration panel, with a discard warning if frames exist."""
+        """Close the calibration panel, with a discard warning if frames exist.
+
+        No warning when "Run Calibration" already succeeded for these captures —
+        the captures served their purpose, so closing just closes (the typical
+        flow: calibrate → set coordinate system → close).
+        """
         total = len(self._calib_left_dets) + len(self._calib_right_dets) + len(self._calib_pairs)
-        if total:
+        if total and not self._calib_run_done:
             ans = QMessageBox.question(
                 self,
                 "Close Calibration Mode?",
                 f"You have <b>{len(self._calib_left_dets)}</b> left, "
                 f"<b>{len(self._calib_right_dets)}</b> right, and "
-                f"<b>{len(self._calib_pairs)}</b> stereo captures.<br><br>"
+                f"<b>{len(self._calib_pairs)}</b> stereo captures <b>not yet used</b> "
+                "by a calibration run.<br><br>"
                 "Closing Calibration Mode will <b>hide</b> the panel but your captures are "
                 "preserved — they will be discarded only if you click <i>Clear All</i>.<br><br>"
                 "Close the panel now?",
@@ -1786,7 +1776,15 @@ class CaptureTab(QWidget):
         self._calib_capture_btn.setEnabled(False)
         self._calib_capture_btn.setStyleSheet("")
 
-        # Restore the user's original frame rate if we lowered it for calibration.
+        self._restore_fps_after_calib()
+
+    def _restore_fps_after_calib(self) -> None:
+        """Restore the user's original frame rate if calibration lowered it.
+
+        MUST run on EVERY path that leaves calibration mode — exiting via the
+        Live Pose button used to bypass it, leaving the stream stuck at the
+        ~20 fps calibration rate ("live pose is slower").
+        """
         if self._calib_fps_active and self._precalib_fps is not None:
             original = self._precalib_fps
             self._calib_fps_active = False
@@ -1877,6 +1875,10 @@ class CaptureTab(QWidget):
             self._calib_mode_btn.setChecked(False)
             self._calib_panel.setVisible(False)
             self._detector = None
+            # Leaving calibration mode by THIS path must also undo the
+            # calibration fps override — otherwise the stream stays at the
+            # ~20 fps calibration rate and live pose runs visibly slower.
+            self._restore_fps_after_calib()
         # Pre-fill the calibration path from the project if not set.
         if not self._pose_calib_edit.text().strip():
             if self._project_dir:
@@ -2502,6 +2504,7 @@ class CaptureTab(QWidget):
 
         if added_to:
             self._last_auto_capture_time = time.monotonic()
+            self._calib_run_done = False  # new captures → close needs confirming again
             self._calib_status_label.setText(
                 f"<span style='color:#2ecc71'>✓ Captured: {' + '.join(added_to)}</span>"
             )
@@ -2558,6 +2561,7 @@ class CaptureTab(QWidget):
             self._calib_grid.clear()
             self._calib_left_grid.clear()
             self._calib_right_grid.clear()
+            self._calib_run_done = False
             self._calib_status_label.setText("")
             self._update_calib_counter()
 
@@ -2701,6 +2705,9 @@ class CaptureTab(QWidget):
         # Calibration exists now → the floor coordinate system can be defined.
         self._calib_saved_path = out_path
         self._set_coord_btn.setEnabled(True)
+        # The captures were consumed by this run — closing the panel no longer
+        # needs a confirmation (until new captures are taken).
+        self._calib_run_done = True
         # A freshly-run calibration has no world frame yet → clears any stale triad.
         self._refresh_world_axes_overlay()
 
@@ -2932,6 +2939,19 @@ class CaptureTab(QWidget):
             if "fit_rms_px" in wf
             else f"chessboard ({side} camera) — {wf['n_agree']}/{wf['n_votes']} frames agree"
         )
+        # Sanity readout: the floor normal should sit within the camera's tilt of
+        # camera-up (≈10–35° on a tripod-level rig).  ~90–120° = the flipped
+        # planar-PnP branch — should be impossible now (up-prior branch pick),
+        # but surface it loudly if it ever appears (e.g. exotic camera mounting).
+        up_deg = float(
+            np.degrees(np.arccos(np.clip(np.dot(wf["z_axis"], [0.0, -1.0, 0.0]), -1.0, 1.0)))
+        )
+        detail += f", floor-normal vs camera-up {up_deg:.0f}°"
+        if up_deg > 60.0:
+            detail += (
+                " — <b>WARNING: orientation looks wrong</b> (skeleton may lie flat); "
+                "verify the triad on the previews and re-set with the board less oblique"
+            )
         return {"wf": wf, "detail": detail, "nodetect": False, "error": None}
 
     def _on_coordsys_done(self, res: dict) -> None:

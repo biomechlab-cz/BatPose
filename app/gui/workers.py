@@ -10,6 +10,7 @@ Each worker:
 
 from __future__ import annotations
 
+import queue
 import traceback
 from typing import Any
 
@@ -52,6 +53,16 @@ class _BaseWorker(QThread):
         raise NotImplementedError
 
 
+#: Lens model index → (lens_model string, intrinsics_flags, use_fisheye).
+#: Shared by the offline (CalibWorker) and live (LiveCalibWorker) calibration
+#: paths so both produce identically-tagged calibration.yml files.
+LENS_MODELS = [
+    ("standard", 0, False),
+    ("wide-angle", _cv2.CALIB_RATIONAL_MODEL, False),
+    ("fisheye", 0, True),
+]
+
+
 class CalibWorker(_BaseWorker):
     """Run the full stereo calibration pipeline in a background thread."""
 
@@ -66,6 +77,7 @@ class CalibWorker(_BaseWorker):
         output_path: str,
         max_frames: int = 60,
         sample_every: int = 5,
+        lens_model: int = 0,  # index into LENS_MODELS (0=standard, 1=wide, 2=fisheye)
         parent=None,
     ):
         super().__init__(parent)
@@ -75,6 +87,7 @@ class CalibWorker(_BaseWorker):
         self._output_path = output_path
         self._max_frames = max_frames
         self._sample_every = sample_every
+        self._lens_model = lens_model
 
     def _run(self) -> Any:
         from app.calib.stereo import run_calibration_pipeline
@@ -104,6 +117,7 @@ class CalibWorker(_BaseWorker):
             )
             self.frame_ready.emit((ann_l, ann_r))
 
+        lens_name, intrinsics_flags, _use_fisheye = LENS_MODELS[self._lens_model]
         result = run_calibration_pipeline(
             self._video_left,
             self._video_right,
@@ -115,6 +129,8 @@ class CalibWorker(_BaseWorker):
             cancel_check=self._check_cancelled,
             frame_cb=None,
             scan_cb=_scan_cb,
+            intrinsics_flags=intrinsics_flags,
+            lens_model="fisheye" if _use_fisheye else "standard",
         )
         return result
 
@@ -170,10 +186,10 @@ class Pose2DWorker(_BaseWorker):
     def _run(self) -> Any:
         import threading
         from concurrent.futures import ThreadPoolExecutor
+
         from app.pose2d.pipeline import process_video, save_pose2d
 
         results: dict = {}
-        first_exc: list = []
 
         # Shared progress state — protected by _lock so the combined value
         # is always consistent regardless of which thread updates it.
@@ -214,9 +230,6 @@ class Pose2DWorker(_BaseWorker):
                         _pct[label] = 100
                         combined = (_pct["left"] + _pct["right"]) // 2
                     self.progress.emit(combined, f"[{label.upper()}] done")
-            except Exception as exc:
-                first_exc.append(exc)
-                raise
             finally:
                 backend.close()
 
@@ -307,31 +320,50 @@ class CaptureWorker(_BaseWorker):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _open_video_writer(out_path: str, fps: float, frame_w: int, frame_h: int):
+        """Create an MJPG VideoWriter and FAIL LOUDLY if it could not open.
+
+        cv2.VideoWriter never raises on a bad path / unavailable codec — it just
+        returns a writer whose write() calls are silently discarded, so a broken
+        recording would otherwise look like a saved one.
+        """
+        writer = _cv2.VideoWriter(
+            out_path, _cv2.VideoWriter_fourcc(*"MJPG"), fps, (frame_w, frame_h)
+        )
+        if not writer.isOpened():
+            writer.release()
+            raise RuntimeError(
+                f"Could not open video writer for {out_path!r} "
+                "(check the output folder exists and is writable, and that the "
+                "MJPG codec is available)."
+            )
+        return writer
+
+    @staticmethod
     def _camera_writer(
-        q: "queue.Queue[Any]",
-        out_path: str,
-        frame_h: int,
-        frame_w: int,
-        fps: float,
+        q: queue.Queue[Any],
+        writer,
         errors: list,
     ) -> None:
-        """Drain *q* and write frames for ONE camera to *out_path*.
+        """Drain *q* and write frames for ONE camera via an already-open writer.
 
         Each item is an independent numpy frame copy; a ``None`` sentinel
-        signals the thread to flush and exit.  The VideoWriter is owned
-        exclusively by this thread.
+        signals the thread to flush and exit.  After creation the VideoWriter is
+        used exclusively by this thread.  On a write error the queue keeps being
+        drained (discarding frames) — a dead consumer would deadlock the
+        producer's blocking ``q.put(None)`` sentinel at stop time.
         """
-        import cv2 as _cv
-
-        writer = _cv.VideoWriter(out_path, _cv.VideoWriter_fourcc(*"MJPG"), fps, (frame_w, frame_h))
         try:
             while True:
                 frame = q.get()
-                if frame is None:          # sentinel — flush and exit
+                if frame is None:  # sentinel — flush and exit
                     break
                 writer.write(frame)
         except Exception as exc:
             errors.append(exc)
+            while True:  # keep draining so stop can't deadlock
+                if q.get() is None:
+                    break
         finally:
             writer.release()
 
@@ -352,10 +384,10 @@ class CaptureWorker(_BaseWorker):
         preview_stride = max(1, round(self._source.fps / 15))
 
         # Per-camera write state.
-        q_l: "queue.Queue[Any] | None" = None
-        q_r: "queue.Queue[Any] | None" = None
-        thread_l: "threading.Thread | None" = None
-        thread_r: "threading.Thread | None" = None
+        q_l: queue.Queue[Any] | None = None
+        q_r: queue.Queue[Any] | None = None
+        thread_l: threading.Thread | None = None
+        thread_r: threading.Thread | None = None
         errors_l: list = []
         errors_r: list = []
         ts_fh: Any = None  # timestamp sidecar, owned by THIS (producer) thread
@@ -365,19 +397,29 @@ class CaptureWorker(_BaseWorker):
         def _start_writers(h: int, w: int) -> None:
             nonlocal q_l, q_r, thread_l, thread_r, ts_fh
             fps = self._source.fps
+            # Open both writers HERE (producer thread) so a bad path / missing
+            # codec aborts recording with a visible error instead of silently
+            # producing an unplayable file (cv2 write() on an unopened writer
+            # is a no-op).  The opened writers are handed to the threads.
+            writer_l = self._open_video_writer(self._out_left, fps, w, h)
+            try:
+                writer_r = self._open_video_writer(self._out_right, fps, w, h)
+            except Exception:
+                writer_l.release()
+                raise
             q_l = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
             q_r = queue.Queue(maxsize=self._WRITE_QUEUE_FRAMES)
             errors_l.clear()
             errors_r.clear()
             thread_l = threading.Thread(
                 target=self._camera_writer,
-                args=(q_l, self._out_left, h, w, fps, errors_l),
+                args=(q_l, writer_l, errors_l),
                 name="capture-writer-left",
                 daemon=True,
             )
             thread_r = threading.Thread(
                 target=self._camera_writer,
-                args=(q_r, self._out_right, h, w, fps, errors_r),
+                args=(q_r, writer_r, errors_r),
                 name="capture-writer-right",
                 daemon=True,
             )
@@ -422,10 +464,7 @@ class CaptureWorker(_BaseWorker):
             ):
                 achieved = (rec_idx - 1) / ((last_hw_ns - first_hw_ns) / 1e9)
             if dropped_frames or (achieved and nominal and achieved < 0.95 * nominal):
-                msg = (
-                    f"⚠ Recording quality: wrote {rec_idx} frames; "
-                    f"{dropped_frames} dropped"
-                )
+                msg = f"⚠ Recording quality: wrote {rec_idx} frames; {dropped_frames} dropped"
                 if achieved:
                     msg += (
                         f"; achieved ~{achieved:.1f} fps vs {nominal:.0f} fps nominal. "
@@ -492,9 +531,7 @@ class CaptureWorker(_BaseWorker):
                         # Both writers fell behind — skip rather than stall the
                         # camera read (which would drop at the hardware buffer).
                         dropped_frames += 1
-                        self._progress(
-                            0, f"Frame {frame.frame_index} skipped (write queue full)"
-                        )
+                        self._progress(0, f"Frame {frame.frame_index} skipped (write queue full)")
 
                 frame_idx += 1
                 self._progress(0, f"Frame {frame.frame_index}  {frame.timestamp:.1f} s")
@@ -526,12 +563,9 @@ class LiveCalibWorker(_BaseWorker):
         2 — Fisheye    (OpenCV fisheye θ-based model)
     """
 
-    #: Lens model index → (label, intrinsics_flags, use_fisheye)
-    _LENS_MODELS = [
-        ("standard", 0, False),
-        ("wide-angle", _cv2.CALIB_RATIONAL_MODEL, False),
-        ("fisheye", 0, True),
-    ]
+    #: Lens model index → (label, intrinsics_flags, use_fisheye) — shared with
+    #: the offline CalibWorker so both paths stay in lockstep.
+    _LENS_MODELS = LENS_MODELS
 
     def __init__(
         self,

@@ -62,6 +62,7 @@ def _make_pose3d(tmp_path: Path, T: int = 60, fps: float = 30.0) -> str:
 
 # ── Input validation feedback ────────────────────────────────────────────────
 
+
 class TestInputValidationFeedback:
     """Every invalid input must produce immediate, visible feedback."""
 
@@ -96,6 +97,7 @@ class TestInputValidationFeedback:
 
 
 # ── Error recovery ───────────────────────────────────────────────────────────
+
 
 class TestErrorRecovery:
     """After any error, the user must be able to retry without restarting."""
@@ -149,6 +151,7 @@ class TestErrorRecovery:
 
 # ── Progress bar state machine ───────────────────────────────────────────────
 
+
 class TestProgressBarStates:
     def test_progress_bar_starts_at_zero(self, calib_tab):
         assert calib_tab._progress_bar.value() == 0
@@ -166,6 +169,7 @@ class TestProgressBarStates:
 
 
 # ── Playback controls state machine ─────────────────────────────────────────
+
 
 class TestPlaybackStateMachine:
     @pytest.fixture
@@ -213,6 +217,7 @@ class TestPlaybackStateMachine:
 
 # ── Session-state completeness ───────────────────────────────────────────────
 
+
 class TestSessionStateCompleteness:
     @pytest.mark.skipif(not _HAS_FIXTURES, reason="Sample fixtures required")
     def test_calib_path_set_via_set_calibration(self, recon_tab):
@@ -233,14 +238,17 @@ class TestSessionStateCompleteness:
 
 # ── Accessibility: keyboard tab order ────────────────────────────────────────
 
+
 class TestKeyboardAccessibility:
     def test_run_button_is_focusable(self, recon_tab):
         """Run button must be in the keyboard tab order."""
         from PySide6.QtCore import Qt
+
         assert recon_tab._run_btn.focusPolicy() != Qt.FocusPolicy.NoFocus
 
     def test_calib_run_button_is_focusable(self, calib_tab):
         from PySide6.QtCore import Qt
+
         assert calib_tab._run_btn.focusPolicy() != Qt.FocusPolicy.NoFocus
 
     def test_slider_responds_to_keyboard(self, recon_tab, tmp_path, qtbot):
@@ -253,6 +261,7 @@ class TestKeyboardAccessibility:
 
 
 # ── Manual expert protocols ──────────────────────────────────────────────────
+
 
 @pytest.mark.manual
 class TestManualUIExpert:

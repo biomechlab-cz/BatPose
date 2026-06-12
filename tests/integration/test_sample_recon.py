@@ -119,7 +119,9 @@ class TestDetectionQuality:
         conf = d["conf3d"]
         detected = joints[conf > 0]
         out_of_range = np.abs(detected) > 10.0
-        assert not np.any(out_of_range), f"{out_of_range.sum()} coordinates outside ±10 m lab volume"
+        assert not np.any(out_of_range), (
+            f"{out_of_range.sum()} coordinates outside ±10 m lab volume"
+        )
 
 
 class TestMetaData:

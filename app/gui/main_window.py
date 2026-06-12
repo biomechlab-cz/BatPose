@@ -174,13 +174,13 @@ class MainWindow(QMainWindow):
     def _on_recon_play_toggled(self, playing: bool) -> None:
         """Recon tab started / stopped — mirror to Analysis tab."""
         if playing:
-            self._analysis_tab._play_timer.stop()   # prevent double-advance
+            self._analysis_tab._play_timer.stop()  # prevent double-advance
         self._analysis_tab.sync_play_state(playing)
 
     def _on_analysis_play_toggled(self, playing: bool) -> None:
         """Analysis tab started / stopped — mirror to Recon tab."""
         if playing:
-            self._recon_tab._play_timer.stop()       # prevent double-advance
+            self._recon_tab._play_timer.stop()  # prevent double-advance
         self._recon_tab.sync_play_state(playing)
 
     def _sync_analysis_tab(self, pose3d_path: str) -> None:
@@ -343,13 +343,24 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Coordinate Reference",
-            "<b>Coordinate system (world frame)</b><br><br>"
+            "<b>Which frame is my data in?</b><br>"
+            "Check <tt>coordinate_frame</tt> in the pose3d.npz meta / the CSV sidecar "
+            "<tt>*_metadata.json</tt>: <b>&quot;world&quot;</b> when <i>Set coordinate "
+            "system</i> was used, otherwise <b>&quot;opencv&quot;</b>.<br><br>"
+            "<b>Floor world frame</b> — defined by a board lying flat on the floor "
+            "(<i>Set coordinate system</i>, Live Capture tab):"
             "<table>"
             "<tr><th align='left'>Axis</th><th align='left'>Direction</th></tr>"
-            "<tr><td><b>X</b></td><td>Right (from camera 1 towards camera 2 baseline)</td></tr>"
-            "<tr><td><b>Y</b></td><td>Up (opposite to gravity)</td></tr>"
-            "<tr><td><b>Z</b></td><td>Out of the camera (towards the subject)</td></tr>"
-            "</table><br>"
+            "<tr><td><b>X</b></td><td>Along the board's <b>longer</b> side</td></tr>"
+            "<tr><td><b>Y</b></td><td>Along the board's <b>shorter</b> side"
+            " (right-handed)</td></tr>"
+            "<tr><td><b>Z</b></td><td><b>Up</b>, out of the floor</td></tr>"
+            "</table>"
+            "Origin = board centre, on the floor.<br><br>"
+            "<b>Camera frame (no floor frame set)</b> — pose3d.npz stores the "
+            "left-camera OpenCV frame: origin at the left camera, X right, "
+            "Y <i>down</i>, Z forward (towards the subject). The 3D viewer shows it "
+            "swapped to Z-up (X lateral, Y depth, Z up).<br><br>"
             "<b>Units:</b> metres (m)<br><br>"
             "<b>COCO-17 joint indices</b><br>"
             "<table>"

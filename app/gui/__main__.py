@@ -18,9 +18,7 @@ def _set_windows_app_id() -> None:
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "biomechlab.BatPose.gui.0.1"
-        )
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("biomechlab.BatPose.gui.0.1")
     except Exception:
         pass  # cosmetic only — never block startup on this
 

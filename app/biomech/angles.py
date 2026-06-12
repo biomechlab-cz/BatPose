@@ -72,9 +72,7 @@ _EPS = 1e-9
 # ---------------------------------------------------------------------------
 
 
-def _three_point_angle(
-    a: np.ndarray, b: np.ndarray, c: np.ndarray
-) -> np.ndarray:
+def _three_point_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
     """Angle at vertex *b* between segments b→a and b→c, in degrees.
 
     Args:
@@ -95,9 +93,7 @@ def _three_point_angle(
     return np.degrees(np.arccos(cos_a))
 
 
-def _trunk_inclination(
-    joints: np.ndarray, present: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def _trunk_inclination(joints: np.ndarray, present: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Angle of the trunk segment against the vertical Z-up axis.
 
     The trunk is the line from the mid-hip to the mid-shoulder.  An upright
@@ -124,12 +120,7 @@ def _trunk_inclination(
     cos_a = np.clip(cos_a, -1.0, 1.0)
     angle = np.degrees(np.arccos(cos_a))
 
-    valid = (
-        present[..., 5]
-        & present[..., 6]
-        & present[..., 11]
-        & present[..., 12]
-    )
+    valid = present[..., 5] & present[..., 6] & present[..., 11] & present[..., 12]
     return angle.astype(np.float32), valid
 
 
@@ -159,9 +150,7 @@ def compute_joint_angles(
     conf3d = np.asarray(conf3d, dtype=np.float32)
 
     if joints3d.ndim != 4 or joints3d.shape[-1] != 3:
-        raise ValueError(
-            f"joints3d must have shape [T, P, J, 3]; got {joints3d.shape}"
-        )
+        raise ValueError(f"joints3d must have shape [T, P, J, 3]; got {joints3d.shape}")
     if conf3d.shape != joints3d.shape[:3]:
         raise ValueError(
             f"conf3d shape {conf3d.shape} does not match joints3d {joints3d.shape[:3]}"
@@ -184,9 +173,7 @@ def compute_joint_angles(
 
         a_idx, b_idx, c_idx = adef.indices
         if max(a_idx, b_idx, c_idx) >= J or min(a_idx, b_idx, c_idx) < 0:
-            raise IndexError(
-                f"Angle {adef.name!r} references joint index outside [0, {J})"
-            )
+            raise IndexError(f"Angle {adef.name!r} references joint index outside [0, {J})")
 
         angle = _three_point_angle(
             joints3d[..., a_idx, :],
@@ -217,8 +204,7 @@ class AngleStats:
     def is_finite(self) -> bool:
         """True iff every field is a finite real number."""
         return all(
-            math.isfinite(v)
-            for v in (self.min_deg, self.max_deg, self.mean_deg, self.rom_deg)
+            math.isfinite(v) for v in (self.min_deg, self.max_deg, self.mean_deg, self.rom_deg)
         )
 
 
@@ -235,20 +221,27 @@ class ExtendedAngleStats:
     mean_deg: float
     median_deg: float
     std_deg: float
-    cv_pct: float          # coefficient of variation (SD / |mean| × 100)
-    rom_deg: float         # range of motion = max − min
-    nan_pct: float         # % of frames with NaN (tracking loss)
+    cv_pct: float  # coefficient of variation (SD / |mean| × 100)
+    rom_deg: float  # range of motion = max − min
+    nan_pct: float  # % of frames with NaN (tracking loss)
     peak_vel_deg_s: float  # max |dθ/dt| in deg/s
-    excursion_deg: float   # Σ |θ[t+1] − θ[t]| over non-NaN spans
+    excursion_deg: float  # Σ |θ[t+1] − θ[t]| over non-NaN spans
 
     @property
     def is_finite(self) -> bool:
         return all(
             math.isfinite(v)
             for v in (
-                self.min_deg, self.max_deg, self.mean_deg, self.median_deg,
-                self.std_deg, self.cv_pct, self.rom_deg, self.nan_pct,
-                self.peak_vel_deg_s, self.excursion_deg,
+                self.min_deg,
+                self.max_deg,
+                self.mean_deg,
+                self.median_deg,
+                self.std_deg,
+                self.cv_pct,
+                self.rom_deg,
+                self.nan_pct,
+                self.peak_vel_deg_s,
+                self.excursion_deg,
             )
         )
 
@@ -286,9 +279,7 @@ def compute_symmetry_index(left_val: float, right_val: float) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def compute_stats(
-    angles: np.ndarray, angle_idx: int, person_idx: int
-) -> AngleStats | None:
+def compute_stats(angles: np.ndarray, angle_idx: int, person_idx: int) -> AngleStats | None:
     """Per-angle / per-person ROM statistics, ignoring NaN frames.
 
     Args:

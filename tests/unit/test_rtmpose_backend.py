@@ -30,12 +30,14 @@ def backend():
 
 # ── Attribute contract ──────────────────────────────────────────────────────
 
+
 class TestAttributes:
     def test_name_is_rtmpose_m(self, backend):
         assert backend.name == "rtmpose_m"
 
     def test_implements_pose_backend_interface(self, backend):
         from app.pose2d.base import PoseBackend
+
         assert isinstance(backend, PoseBackend)
 
     def test_close_is_idempotent(self, backend):
@@ -45,6 +47,7 @@ class TestAttributes:
 
 
 # ── Output contract: blank frame ────────────────────────────────────────────
+
 
 class TestContractBlankFrame:
     """Blank (all-zero) frames — no person present."""
@@ -99,6 +102,7 @@ class TestContractBlankFrame:
 
 # ── Output contract: non-trivial frames ─────────────────────────────────────
 
+
 class TestContractVariousFrames:
     @pytest.mark.parametrize("h,w", [(240, 320), (480, 640), (720, 1280)])
     def test_handles_various_resolutions(self, backend, h, w):
@@ -138,6 +142,7 @@ class TestContractVariousFrames:
 
 # ── Import / availability guard ─────────────────────────────────────────────
 
+
 class TestImportGuard:
     def test_import_error_without_rtmlib(self, monkeypatch):
         """RTMPoseBackend must raise ImportError if rtmlib is unavailable."""
@@ -151,6 +156,7 @@ class TestImportGuard:
         monkeypatch.setitem(sys.modules, "rtmlib", None)
 
         import app.pose2d.rtmpose_backend as mod
+
         importlib.reload(mod)
 
         with pytest.raises(ImportError, match="rtmlib"):

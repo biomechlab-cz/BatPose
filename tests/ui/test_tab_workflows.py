@@ -15,11 +15,10 @@ Tests that need real FLIR hardware or live recording are marked @pytest.mark.man
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
 
 from app.gui.calib_tab import CalibTab
 from app.gui.recon_tab import ReconTab
@@ -32,6 +31,7 @@ _HAS_FIXTURES = _CALIB.exists() and _P2D_L.exists() and _P2D_R.exists()
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def calib_tab(qtbot):
@@ -60,6 +60,7 @@ def _make_pose3d(tmp_path: Path, T: int = 60, fps: float = 30.0) -> str:
 
 
 # ── CalibTab: button-state machine ────────────────────────────────────────────
+
 
 class TestCalibButtonStates:
     def test_run_disabled_on_empty_fields(self, calib_tab):
@@ -121,6 +122,7 @@ class TestCalibButtonStates:
 
 # ── ReconTab: backend combo mapping ──────────────────────────────────────────
 
+
 class TestBackendComboMapping:
     def test_default_combo_text_contains_mediapipe(self, recon_tab):
         assert "mediapipe" in recon_tab._backend_combo.itemText(0).lower()
@@ -151,6 +153,7 @@ class TestBackendComboMapping:
 
 
 # ── ReconTab: tab-switch state preservation ──────────────────────────────────
+
 
 class TestTabSwitchStatePreservation:
     def test_text_fields_survive_show_hide(self, recon_tab, tmp_path):
@@ -185,13 +188,12 @@ class TestTabSwitchStatePreservation:
 
 # ── ReconTab: auto-load idempotency (double-load bug) ────────────────────────
 
+
 class TestAutoLoadIdempotency:
     def test_load_pose3d_twice_same_path_does_not_double_log(self, recon_tab, tmp_path):
         """Calling _load_pose3d for an already-loaded path must not append duplicate log."""
         path = _make_pose3d(tmp_path)
         recon_tab._load_pose3d(path)
-        log_after_first = recon_tab._log.toPlainText()
-
         recon_tab._load_pose3d(path)
         log_after_second = recon_tab._log.toPlainText()
 
@@ -229,6 +231,7 @@ class TestAutoLoadIdempotency:
 
 
 # ── ReconTab: MediaPipe → RTMPose switch ─────────────────────────────────────
+
 
 class TestBackendSwitch:
     def test_viewer_data_persists_when_combo_changes(self, recon_tab, tmp_path):
@@ -274,6 +277,7 @@ class TestBackendSwitch:
 
 
 # ── CalibTab: run-button tooltip lists exactly the missing fields ─────────────
+
 
 class TestCalibRunTooltip:
     def test_tooltip_lists_missing_left_video(self, calib_tab):

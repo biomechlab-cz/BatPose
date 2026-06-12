@@ -88,6 +88,7 @@ def smooth_trajectory(
     min_cutoff: float = 0.5,
     beta: float = 0.05,
     d_cutoff: float = 1.0,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Apply OneEuro filter independently to each scalar dimension of a trajectory.
@@ -98,6 +99,13 @@ def smooth_trajectory(
         min_cutoff: OneEuro min_cutoff (Hz)
         beta:       OneEuro beta
         d_cutoff:   OneEuro d_cutoff (Hz)
+        valid:      optional [T] bool mask of REAL measurements.  Invalid frames
+                    (e.g. rejected joints zeroed by the triangulator) are NOT fed
+                    into the filter — they would otherwise act as genuine
+                    zero-position samples and drag the filter state toward the
+                    origin across tracking gaps.  Instead the last smoothed value
+                    is held (matching the live-tracking behaviour); leading
+                    invalid frames pass through unchanged.
 
     Returns:
         smoothed array with the same shape as *traj*
@@ -106,10 +114,20 @@ def smooth_trajectory(
     flat = traj.reshape(T, -1)  # [T, N]
     N = flat.shape[1]
 
+    if valid is not None and valid.shape[0] != T:
+        raise ValueError(f"valid mask length {valid.shape[0]} != trajectory length {T}")
+
     out = np.empty_like(flat)
     for n in range(N):
         filt = OneEuroFilter(fps, min_cutoff, beta, d_cutoff)
+        last: float | None = None
         for t in range(T):
-            out[t, n] = filt(float(flat[t, n]))
+            if valid is not None and not valid[t]:
+                # Gap: hold the last smoothed value (filter state untouched);
+                # before any valid sample just pass the input through.
+                out[t, n] = last if last is not None else float(flat[t, n])
+                continue
+            last = filt(float(flat[t, n]))
+            out[t, n] = last
 
     return out.reshape(traj.shape)

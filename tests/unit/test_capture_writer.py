@@ -69,7 +69,7 @@ def _run_recording(tmp_path: Path, n: int, fps: float = 50.0):
     out_r = str(tmp_path / "rec_right.avi")
     worker = CaptureWorker(_FakeSource(n, fps=fps))
     worker.begin_recording(out_l, out_r)  # record from the first frame
-    worker._run()                         # synchronous — no QThread needed
+    worker._run()  # synchronous — no QThread needed
     return out_l, out_r
 
 
@@ -122,8 +122,65 @@ class TestCaptureWriter:
     def test_source_started_and_stopped(self, tmp_path):
         src = _FakeSource(10)
         worker = CaptureWorker(src)
-        worker.begin_recording(
-            str(tmp_path / "l.avi"), str(tmp_path / "r.avi")
-        )
+        worker.begin_recording(str(tmp_path / "l.avi"), str(tmp_path / "r.avi"))
         worker._run()
         assert src.started and src.stopped
+
+
+class TestWriterOpenFailure:
+    """A VideoWriter that never opens must FAIL LOUDLY, not look like a saved
+    recording — cv2 silently discards write() on an unopened writer."""
+
+    def test_open_writer_bad_path_raises(self, tmp_path):
+        bad = tmp_path / "no_such_dir" / "out.avi"
+        with pytest.raises(RuntimeError, match="Could not open video writer"):
+            CaptureWorker._open_video_writer(str(bad), 30.0, 64, 48)
+
+    def test_open_writer_good_path_opens(self, tmp_path):
+        w = CaptureWorker._open_video_writer(str(tmp_path / "ok.avi"), 30.0, 64, 48)
+        try:
+            assert w.isOpened()
+        finally:
+            w.release()
+
+    def test_recording_to_bad_path_aborts_with_error(self, tmp_path):
+        """End-to-end: begin_recording into a missing folder must raise (the
+        worker surfaces it as an error dialog), never emit recording_finished."""
+        src = _FakeSource(10)
+        worker = CaptureWorker(src)
+        finished: list = []
+        worker.recording_finished.connect(lambda left, right: finished.append((left, right)))
+        worker.begin_recording(
+            str(tmp_path / "missing" / "l.avi"), str(tmp_path / "missing" / "r.avi")
+        )
+        with pytest.raises(RuntimeError, match="Could not open video writer"):
+            worker._run()
+        assert finished == []  # no fake success
+        assert src.stopped  # source released despite the failure
+
+    def test_camera_writer_drains_queue_after_write_error(self):
+        """A crashed writer keeps draining so the producer's blocking sentinel
+        put can never deadlock the stop path."""
+        import queue
+
+        class _BadWriter:
+            released = False
+
+            def write(self, frame):
+                raise RuntimeError("disk full")
+
+            def release(self):
+                self.released = True
+
+        q: queue.Queue = queue.Queue()
+        for _ in range(3):
+            q.put(np.zeros((4, 4, 3), np.uint8))
+        q.put(None)  # sentinel
+
+        bad = _BadWriter()
+        errors: list = []
+        CaptureWorker._camera_writer(q, bad, errors)
+
+        assert errors and "disk full" in str(errors[0])
+        assert q.empty()  # fully drained — stop can't block
+        assert bad.released

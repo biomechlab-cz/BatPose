@@ -29,8 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=20.0,
         help="Max reprojection error in pixels (default 20)",
     )
-    p.add_argument("--min-cutoff", type=float, default=0.5, help="OneEuro min_cutoff Hz")
-    p.add_argument("--beta", type=float, default=0.05, help="OneEuro beta")
+    # Smoothing defaults MUST match the GUI / reconstruct3d() defaults so the
+    # same inputs produce the same pose3d.npz regardless of entry point.
+    p.add_argument("--min-cutoff", type=float, default=1.0, help="OneEuro min_cutoff Hz")
+    p.add_argument("--beta", type=float, default=0.5, help="OneEuro beta")
     p.add_argument("--d-cutoff", type=float, default=1.0, help="OneEuro d_cutoff Hz")
     p.add_argument(
         "--export-csv",
@@ -88,9 +90,11 @@ def _write_csv(
 
 
 def _progress(pct: int, msg: str) -> None:
+    # ASCII-only: Windows consoles are often cp1250 and block characters
+    # crash plain print there.
     bar_len = 30
     filled = int(bar_len * pct / 100)
-    bar = "█" * filled + "░" * (bar_len - filled)
+    bar = "#" * filled + "-" * (bar_len - filled)
     print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
 
 

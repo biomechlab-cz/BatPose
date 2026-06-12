@@ -49,9 +49,7 @@ def pipeline_result(tmp_path_factory):
     fps = cap.get(_cv2.CAP_PROP_FPS) or 30.0
     w = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
-    writer = _cv2.VideoWriter(
-        trimmed, _cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h)
-    )
+    writer = _cv2.VideoWriter(trimmed, _cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h))
     for _ in range(_MAX_FRAMES):
         ok, frame = cap.read()
         if not ok:
@@ -70,6 +68,7 @@ def pipeline_result(tmp_path_factory):
 
 
 # ── Output schema ────────────────────────────────────────────────────────────
+
 
 class TestOutputSchema:
     def test_keypoints_ndim_4(self, pipeline_result):
@@ -91,9 +90,7 @@ class TestOutputSchema:
 
     def test_frame_count_matches_input(self, pipeline_result):
         kps, _, _ = pipeline_result
-        assert kps.shape[0] == _MAX_FRAMES, (
-            f"Expected {_MAX_FRAMES} frames, got {kps.shape[0]}"
-        )
+        assert kps.shape[0] == _MAX_FRAMES, f"Expected {_MAX_FRAMES} frames, got {kps.shape[0]}"
 
     def test_keypoints_dtype_float32(self, pipeline_result):
         kps, _, _ = pipeline_result
@@ -105,6 +102,7 @@ class TestOutputSchema:
 
 
 # ── Meta keys match MediaPipe schema ────────────────────────────────────────
+
 
 class TestMetaSchema:
     def test_fps_present_and_positive(self, pipeline_result):
@@ -131,6 +129,7 @@ class TestMetaSchema:
 
 
 # ── Detection quality ────────────────────────────────────────────────────────
+
 
 class TestDetectionQuality:
     def test_some_frames_have_nonzero_confidence(self, pipeline_result):
@@ -166,6 +165,7 @@ class TestDetectionQuality:
 
 # ── NPZ save/load round-trip ─────────────────────────────────────────────────
 
+
 class TestNpzRoundTrip:
     def test_saved_npz_loads_with_same_shapes(self, pipeline_result, tmp_path):
         from app.pose2d.pipeline import load_pose2d, save_pose2d
@@ -181,7 +181,7 @@ class TestNpzRoundTrip:
 
     def test_saved_npz_schema_identical_to_mediapipe(self, pipeline_result, tmp_path):
         """Keys in an RTMPose NPZ must be a superset of MediaPipe NPZ keys."""
-        from app.pose2d.pipeline import load_pose2d, save_pose2d
+        from app.pose2d.pipeline import save_pose2d
 
         kps, conf, meta = pipeline_result
         out = str(tmp_path / "pose2d_rtm2.npz")

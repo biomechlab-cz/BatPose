@@ -31,6 +31,7 @@ def _suppress_modal_dialogs():
     # Configure WelcomeDialog mock so it does not show a window and does not
     # trigger any sample-project or new-project action.
     from unittest.mock import MagicMock
+
     mock_dlg = MagicMock()
     mock_dlg.open_sample = False
     mock_dlg.new_project = False

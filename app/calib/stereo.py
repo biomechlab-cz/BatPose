@@ -1101,6 +1101,7 @@ def run_calibration_pipeline(
     frame_cb: Callable | None = None,
     scan_cb: Callable | None = None,
     intrinsics_flags: int = 0,
+    lens_model: str = "standard",
 ) -> str | None:
     """
     Full calibration pipeline: frame extraction → stereo calibration → save.
@@ -1120,7 +1121,12 @@ def run_calibration_pipeline(
         scan_cb: called on every sampled frame (throttled) with
                  (frame_l, frame_r, det_l_ok, det_r_ok)
         intrinsics_flags: extra cv2.calibrateCamera flags
-                          (e.g. cv2.CALIB_RATIONAL_MODEL for wide-angle lenses)
+                          (e.g. cv2.CALIB_RATIONAL_MODEL for wide-angle lenses);
+                          ignored when lens_model == "fisheye"
+        lens_model: "standard" (pinhole, optionally with rational flags) or
+                    "fisheye" (θ-based model, FOV ≥ 150°).  Selecting the wrong
+                    model silently poisons reconstruction — a fisheye rig
+                    calibrated as pinhole undistorts to garbage rays.
 
     Returns:
         output_path on success, None if cancelled
@@ -1172,15 +1178,28 @@ def run_calibration_pipeline(
     h, w = selections[0].frame_left.shape[:2]
     img_size = (w, h)
 
-    calib_data = calibrate_stereo(
-        selections,
-        img_size,
-        progress_cb=_progress_calib,
-        cancel_check=cancel_check,
-        all_det_l=all_det_l,
-        all_det_r=all_det_r,
-        intrinsics_flags=intrinsics_flags,
-    )
+    if lens_model == "fisheye":
+        # Fisheye rigs MUST go through the θ-based model — calibrate_stereo's
+        # pinhole polynomial breaks down at ≥150° FOV and the resulting yml
+        # (tagged "standard") poisons every downstream undistort/triangulation.
+        calib_data = calibrate_stereo_fisheye(
+            selections,
+            img_size,
+            progress_cb=_progress_calib,
+            cancel_check=cancel_check,
+            all_det_l=all_det_l,
+            all_det_r=all_det_r,
+        )
+    else:
+        calib_data = calibrate_stereo(
+            selections,
+            img_size,
+            progress_cb=_progress_calib,
+            cancel_check=cancel_check,
+            all_det_l=all_det_l,
+            all_det_r=all_det_r,
+            intrinsics_flags=intrinsics_flags,
+        )
 
     if cancel_check and cancel_check():
         return None

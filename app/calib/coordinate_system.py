@@ -558,6 +558,12 @@ def compute_world_frame_monocular(
     board clearly (e.g. it sits near the left frame's edge but is central in the
     right).
 
+    The two-fold planar-PnP ambiguity is resolved PHYSICALLY: both IPPE branches
+    are computed and the one whose board normal points up (toward camera −Y) is
+    chosen — valid for any floor board seen by a roughly-level camera.  Without
+    this, the optimiser's branch choice is placement-dependent and can be
+    systematically wrong (not fixable by reprojection error or voting).
+
     Raises ValueError if the corner count doesn't match the board.
     """
     objp = centered_board_objpoints(squares_x, squares_y, square_size)
@@ -570,19 +576,56 @@ def compute_world_frame_monocular(
     if fisheye:
         # Undistort to normalized rays, then PnP with identity intrinsics.
         und = cv2.fisheye.undistortPoints(img_pts.reshape(-1, 1, 2), Kf, Df.reshape(4, 1))
-        ok, rvec, tvec = cv2.solvePnP(
-            objp, und.reshape(-1, 1, 2), np.eye(3), None, flags=cv2.SOLVEPNP_ITERATIVE
+        pnp_pts, pnp_K, pnp_D = und.reshape(-1, 1, 2), np.eye(3), None
+    else:
+        pnp_pts, pnp_K, pnp_D = img_pts.reshape(-1, 1, 2), Kf, Df
+
+    # Planar PnP has a TWO-FOLD pose ambiguity, and the two branches are not
+    # separable by reprojection error (measured: 0.1 px apart).  Worse, which
+    # branch the ITERATIVE optimiser converges to is placement-dependent — at
+    # some board positions it lands on the WRONG branch for the majority of
+    # frames, so even majority voting locks in a flipped frame (observed on
+    # hardware: world Z 114° from camera-up → the live skeleton lay flat).
+    # Disambiguate PHYSICALLY instead: ask IPPE for both branches and pick the
+    # one whose board normal points UP — for a board on the FLOOR seen by a
+    # roughly-level camera (camera Y points down), up ≈ camera −Y.  (Only a
+    # camera rolled/pitched beyond ~90°, e.g. mounted overhead pointing straight
+    # down, would defeat this prior.)
+    rvecs: list = []
+    tvecs: list = []
+    try:
+        n_sol, rvecs, tvecs, _err = cv2.solvePnPGeneric(
+            objp, pnp_pts, pnp_K, pnp_D, flags=cv2.SOLVEPNP_IPPE
         )
+    except cv2.error:
+        n_sol = 0
+    if not n_sol:
+        ok, rvec, tvec = cv2.solvePnP(objp, pnp_pts, pnp_K, pnp_D, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            raise ValueError("solvePnP failed to recover the board pose")
+        rvecs, tvecs = [rvec], [tvec]
+
+    def _up_score(rv, tv) -> float:
+        Rb, _ = cv2.Rodrigues(rv)
+        n = Rb[:, 2]
+        if float(n @ tv.reshape(3)) > 0:
+            n = -n  # orient the plane normal toward the camera (= up for a floor board)
+        return float(n @ np.array([0.0, -1.0, 0.0]))  # camera "up" (camera Y points down)
+
+    best = max(range(len(rvecs)), key=lambda i: _up_score(rvecs[i], tvecs[i]))
+    rvec, tvec = rvecs[best], tvecs[best]
+    # Refine the chosen branch (IPPE is analytic; LM polishes the corners fit).
+    try:
+        rvec, tvec = cv2.solvePnPRefineLM(objp, pnp_pts, pnp_K, pnp_D, rvec, tvec)
+    except cv2.error:
+        pass  # refinement is best-effort
+
+    if fisheye:
         proj, _ = cv2.fisheye.projectPoints(
             objp.reshape(-1, 1, 3), rvec, tvec, Kf, Df.reshape(4, 1)
         )
     else:
-        ok, rvec, tvec = cv2.solvePnP(
-            objp, img_pts.reshape(-1, 1, 2), Kf, Df, flags=cv2.SOLVEPNP_ITERATIVE
-        )
         proj, _ = cv2.projectPoints(objp, rvec, tvec, Kf, Df)
-    if not ok:
-        raise ValueError("solvePnP failed to recover the board pose")
 
     rms = float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - img_pts) ** 2, axis=1))))
     R_bc, _ = cv2.Rodrigues(rvec)

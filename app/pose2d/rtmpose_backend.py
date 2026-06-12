@@ -68,8 +68,8 @@ class RTMPoseBackend(PoseBackend):
                 np.zeros((1, 17), dtype=np.float32),
             )
 
-        kps = np.array(keypoints, dtype=np.float32)   # [P, 17, 2]
-        conf = np.array(scores, dtype=np.float32)      # [P, 17]
+        kps = np.array(keypoints, dtype=np.float32)  # [P, 17, 2]
+        conf = np.array(scores, dtype=np.float32)  # [P, 17]
 
         # Guard: rtmlib may return [17, 2] for a single person
         if kps.ndim == 2:

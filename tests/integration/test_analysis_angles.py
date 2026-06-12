@@ -19,7 +19,6 @@ from app.biomech import (
     compute_stats,
 )
 
-
 _PROJECT = Path(__file__).parents[2] / "data" / "Test project" / "test_fixture"
 _CALIB = _PROJECT / "calibration.yml"
 _P2D_L = _PROJECT / "pose2d_left.npz"

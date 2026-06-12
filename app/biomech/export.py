@@ -47,9 +47,7 @@ def angles_to_csv(
     if angle_names is None:
         angle_names = [a.name for a in ANGLE_DEFINITIONS]
     if len(angle_names) != N:
-        raise ValueError(
-            f"angle_names length {len(angle_names)} != angles' last dim {N}"
-        )
+        raise ValueError(f"angle_names length {len(angle_names)} != angles' last dim {N}")
 
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

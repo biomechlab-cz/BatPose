@@ -342,6 +342,82 @@ class TestMonocularChessboardFrame:
                 np.zeros((5, 2)), self.K, np.zeros(5), SX, SY, SS, fisheye=False
             )
 
+
+class TestPlanarBranchDisambiguation:
+    """The two-fold planar-PnP ambiguity must be resolved by the floor-up prior.
+
+    Which branch the ITERATIVE optimiser converges to is placement-dependent —
+    at some board placements the WRONG branch wins the per-frame majority, so
+    voting locked in a flipped frame (hardware: world Z 114° from camera-up →
+    live skeleton lay flat).  compute_world_frame_monocular now evaluates BOTH
+    IPPE branches and picks the up-pointing one, so the recovered normal must
+    match the ground truth at ANY oblique placement.
+    """
+
+    K = np.array([[800.0, 0, 512.0], [0, 800.0, 512.0], [0, 0, 1.0]])
+
+    @staticmethod
+    def _rot_x(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+    @staticmethod
+    def _rot_y(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+    def _project(self, pts_cam):
+        z = pts_cam[:, 2:3]
+        xy = pts_cam[:, :2] / z
+        return np.column_stack(
+            [xy[:, 0] * self.K[0, 0] + self.K[0, 2], xy[:, 1] * self.K[1, 1] + self.K[1, 2]]
+        ).astype(np.float64)
+
+    def test_normal_correct_across_oblique_placements(self):
+        """Sweep pitch/yaw obliquities — recovered Z must track the true normal."""
+        base = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)  # flat on floor
+        objp = centered_board_objpoints(SX, SY, SS)
+        for pitch_deg in (-30, -15, 0, 15, 30):
+            for yaw_deg in (-40, -20, 0, 20, 40):
+                R_cam = self._rot_y(np.radians(yaw_deg)) @ self._rot_x(np.radians(pitch_deg))
+                R_bc = R_cam @ base
+                if R_bc[1, 2] > -0.2:
+                    continue  # normal no longer clearly 'up' — not a floor-board pose
+                t_bc = R_cam @ np.array([0.1, 0.5, 2.2])
+                img = self._project(objp @ R_bc.T + t_bc)
+                wf = compute_world_frame_monocular(
+                    img, self.K, np.zeros(5), SX, SY, SS, fisheye=False
+                )
+                true_z = -R_bc[:, 2] if R_bc[:, 2] @ t_bc > 0 else R_bc[:, 2]
+                ang = np.degrees(np.arccos(np.clip(np.dot(wf["z_axis"], true_z), -1, 1)))
+                assert ang < 2.0, (
+                    f"normal off by {ang:.1f} deg at pitch={pitch_deg} yaw={yaw_deg} "
+                    "(flipped PnP branch chosen?)"
+                )
+
+    def test_both_branches_exist_and_flipped_one_is_rejected(self):
+        """At an oblique pose IPPE genuinely returns two branches; the function
+        must return the up-pointing one."""
+        import cv2
+
+        base = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
+        R_bc = self._rot_x(np.radians(25)) @ base
+        t_bc = np.array([0.3, 0.6, 2.0])
+        objp = centered_board_objpoints(SX, SY, SS)
+        img = self._project(objp @ R_bc.T + t_bc)
+
+        n_sol, rvecs, _tvecs, _err = cv2.solvePnPGeneric(
+            objp, img.reshape(-1, 1, 2), self.K, np.zeros(5), flags=cv2.SOLVEPNP_IPPE
+        )
+        assert n_sol == 2  # the ambiguity is real at this obliquity
+        normals = [cv2.Rodrigues(rv)[0][:, 2] for rv in rvecs]
+        spread = np.degrees(np.arccos(np.clip(abs(float(normals[0] @ normals[1])), -1, 1)))
+        assert spread > 20  # and the branches are far apart
+
+        wf = compute_world_frame_monocular(img, self.K, np.zeros(5), SX, SY, SS, fisheye=False)
+        # The chosen Z points up (towards camera -Y), never into the floor.
+        assert float(np.dot(wf["z_axis"], [0, -1, 0])) > 0.7
+
     def test_detect_chessboard_returns_none_on_blank(self):
         blank = np.zeros((480, 640), dtype=np.uint8)
         assert detect_chessboard_corners(blank, SX, SY) is None

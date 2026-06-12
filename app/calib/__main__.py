@@ -35,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="ArUco dictionary (ChArUco only, default: DICT_4X4_50)",
     )
     # Chessboard params (also re-use --squares-x/y and --square-size)
+    p.add_argument(
+        "--lens",
+        choices=["standard", "wide-angle", "fisheye"],
+        default="standard",
+        help="Lens / distortion model: standard (<=90 deg FOV), wide-angle "
+        "(rational model, 90-150 deg), fisheye (theta-based, >150 deg). "
+        "MUST match the physical lens or reconstruction is silently poisoned "
+        "(default: standard)",
+    )
     # Frame selection
     p.add_argument("--max-frames", type=int, default=60, help="Max calibration frames to use")
     p.add_argument("--sample-every", type=int, default=5, help="Sample every N frames")
@@ -70,14 +79,19 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     def progress(pct: int, msg: str) -> None:
+        # ASCII-only: Windows consoles are often cp1250 and block characters
+        # crash plain print there.
         bar_len = 30
         filled = int(bar_len * pct / 100)
-        bar = "█" * filled + "░" * (bar_len - filled)
+        bar = "#" * filled + "-" * (bar_len - filled)
         print(f"\r[{bar}] {pct:3d}%  {msg:<50}", end="", flush=True)
 
     print(f"Calibrating stereo pair: {args.left!r} + {args.right!r}")
     print(f"Board: {board_cfg}")
+    print(f"Lens:  {args.lens}")
     print()
+
+    import cv2
 
     from .stereo import run_calibration_pipeline
 
@@ -91,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
             sample_every=args.sample_every,
             min_coverage=args.min_coverage,
             progress_cb=progress,
+            intrinsics_flags=cv2.CALIB_RATIONAL_MODEL if args.lens == "wide-angle" else 0,
+            lens_model="fisheye" if args.lens == "fisheye" else "standard",
         )
     except Exception as e:
         print(f"\n\nError: {e}", file=sys.stderr)

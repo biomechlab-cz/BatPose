@@ -27,7 +27,6 @@ from __future__ import annotations
 import csv
 import math
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -50,9 +49,9 @@ from app.gui.analysis_tab import AnalysisTab, _opencv_to_zup
 FPS = 30.0
 
 # Indices into ANGLE_DEFINITIONS (order defined in app/biomech/angles.py):
-_LKNEE = 0   # L Knee Flex   (11, 13, 15)
-_RKNEE = 1   # R Knee Flex   (12, 14, 16)
-_TRUNK = 8   # Trunk Inclination
+_LKNEE = 0  # L Knee Flex   (11, 13, 15)
+_RKNEE = 1  # R Knee Flex   (12, 14, 16)
+_TRUNK = 8  # Trunk Inclination
 
 # ---------------------------------------------------------------------------
 # Geometry helpers
@@ -65,33 +64,34 @@ def _zup_to_opencv(pts: np.ndarray) -> np.ndarray:
     Z-up (x, y, z)  →  OpenCV (x, -z, y).
     Verified: _opencv_to_zup(_zup_to_opencv(v)) == v.
     """
-    return np.stack(
-        [pts[..., 0], -pts[..., 2], pts[..., 1]], axis=-1
-    ).astype(np.float32)
+    return np.stack([pts[..., 0], -pts[..., 2], pts[..., 1]], axis=-1).astype(np.float32)
 
 
 # COCO-17 standing pose in Z-up (metres):
 #   X right, Y anterior (depth), Z up.
 #   Hip/knee/ankle on a straight vertical line → knee angle = 180°.
-_STANDING_ZUP = np.array([
-    [0.00,  0.05, 1.70],   #  0 nose
-    [-0.03, 0.05, 1.72],   #  1 L eye
-    [0.03,  0.05, 1.72],   #  2 R eye
-    [-0.08, 0.00, 1.70],   #  3 L ear
-    [0.08,  0.00, 1.70],   #  4 R ear
-    [-0.18, 0.00, 1.45],   #  5 L shoulder
-    [0.18,  0.00, 1.45],   #  6 R shoulder
-    [-0.18, 0.00, 1.15],   #  7 L elbow
-    [0.18,  0.00, 1.15],   #  8 R elbow
-    [-0.18, 0.00, 0.85],   #  9 L wrist
-    [0.18,  0.00, 0.85],   # 10 R wrist
-    [-0.10, 0.00, 0.90],   # 11 L hip
-    [0.10,  0.00, 0.90],   # 12 R hip
-    [-0.10, 0.00, 0.50],   # 13 L knee  ← vertex
-    [0.10,  0.00, 0.50],   # 14 R knee  ← vertex
-    [-0.10, 0.00, 0.00],   # 15 L ankle (collinear with hip/knee → 180°)
-    [0.10,  0.00, 0.00],   # 16 R ankle
-], dtype=np.float32)
+_STANDING_ZUP = np.array(
+    [
+        [0.00, 0.05, 1.70],  #  0 nose
+        [-0.03, 0.05, 1.72],  #  1 L eye
+        [0.03, 0.05, 1.72],  #  2 R eye
+        [-0.08, 0.00, 1.70],  #  3 L ear
+        [0.08, 0.00, 1.70],  #  4 R ear
+        [-0.18, 0.00, 1.45],  #  5 L shoulder
+        [0.18, 0.00, 1.45],  #  6 R shoulder
+        [-0.18, 0.00, 1.15],  #  7 L elbow
+        [0.18, 0.00, 1.15],  #  8 R elbow
+        [-0.18, 0.00, 0.85],  #  9 L wrist
+        [0.18, 0.00, 0.85],  # 10 R wrist
+        [-0.10, 0.00, 0.90],  # 11 L hip
+        [0.10, 0.00, 0.90],  # 12 R hip
+        [-0.10, 0.00, 0.50],  # 13 L knee  ← vertex
+        [0.10, 0.00, 0.50],  # 14 R knee  ← vertex
+        [-0.10, 0.00, 0.00],  # 15 L ankle (collinear with hip/knee → 180°)
+        [0.10, 0.00, 0.00],  # 16 R ankle
+    ],
+    dtype=np.float32,
+)
 
 
 def _make_standing_pose3d(
@@ -102,8 +102,8 @@ def _make_standing_pose3d(
     All positions are stored in the OpenCV camera frame (AnalysisTab
     converts them to Z-up internally via _opencv_to_zup on load).
     """
-    zup = np.tile(_STANDING_ZUP, (T, P, 1, 1))          # [T, P, 17, 3] Z-up
-    cv  = _zup_to_opencv(zup)                            # → OpenCV frame
+    zup = np.tile(_STANDING_ZUP, (T, P, 1, 1))  # [T, P, 17, 3] Z-up
+    cv = _zup_to_opencv(zup)  # → OpenCV frame
     conf = np.ones((T, P, 17), dtype=np.float32)
     meta = {"fps": fps, "model_name": "synthetic"}
     path = str(tmp_path / name)
@@ -143,8 +143,8 @@ def _make_asymmetric_pose3d(
         dtype=np.float32,
     )
 
-    zup  = np.tile(template, (T, 1, 1, 1))
-    cv   = _zup_to_opencv(zup)
+    zup = np.tile(template, (T, 1, 1, 1))
+    cv = _zup_to_opencv(zup)
     conf = np.ones((T, 1, 17), dtype=np.float32)
     meta = {"fps": fps, "model_name": "synthetic"}
     path = str(tmp_path / "asym_pose3d.npz")
@@ -157,6 +157,7 @@ def _pump(ms: int = 0) -> None:
     QCoreApplication.processEvents()
     if ms > 0:
         import time
+
         deadline = time.monotonic() + ms / 1000.0
         while time.monotonic() < deadline:
             QCoreApplication.processEvents()
@@ -165,6 +166,7 @@ def _pump(ms: int = 0) -> None:
 # ============================================================================
 # Scenario 1 — Load a recording; confirm tables are populated
 # ============================================================================
+
 
 class TestScenario1Loading:
     """
@@ -231,6 +233,7 @@ class TestScenario1Loading:
 # ============================================================================
 # Scenario 2 — Statistics accuracy: UI values match the biomech module
 # ============================================================================
+
 
 class TestScenario2StatsAccuracy:
     """
@@ -301,16 +304,16 @@ class TestScenario2StatsAccuracy:
             s = compute_extended_stats(angles, k, 0, fps=FPS)
             if s is None:
                 continue
-            cell = float(tab._full_table.item(k, 5).text())   # ROM col
+            cell = float(tab._full_table.item(k, 5).text())  # ROM col
             assert cell == pytest.approx(s.rom_deg, abs=0.15), (
-                f"ROM mismatch for {ANGLE_DEFINITIONS[k].name}: "
-                f"UI={cell}, module={s.rom_deg}"
+                f"ROM mismatch for {ANGLE_DEFINITIONS[k].name}: UI={cell}, module={s.rom_deg}"
             )
 
 
 # ============================================================================
 # Scenario 3 — Segment ROI phase analysis
 # ============================================================================
+
 
 class TestScenario3SegmentROI:
     """
@@ -339,13 +342,11 @@ class TestScenario3SegmentROI:
     def test_segment_stats_auto_populate_after_debounce(self, loaded, qtbot):
         """After the 150 ms debounce timer fires, every Segment cell must be numeric."""
         self._set_roi(loaded, f0=10, f1=50)
-        qtbot.wait(300)   # 2× debounce headroom
+        qtbot.wait(300)  # 2× debounce headroom
         _pump()
         t = loaded._seg_table
         populated = any(
-            t.item(r, c).text() != "—"
-            for r in range(t.rowCount())
-            for c in range(t.columnCount())
+            t.item(r, c).text() != "—" for r in range(t.rowCount()) for c in range(t.columnCount())
         )
         assert populated, "Segment table still all '—' after ROI + debounce"
 
@@ -359,8 +360,8 @@ class TestScenario3SegmentROI:
         self._set_roi(loaded, 10, 50)
         _pump()
         assert "Start:" in loaded._roi_start_lbl.text()
-        assert "End:"   in loaded._roi_end_lbl.text()
-        assert "Dur:"   in loaded._roi_dur_lbl.text()
+        assert "End:" in loaded._roi_end_lbl.text()
+        assert "Dur:" in loaded._roi_dur_lbl.text()
         assert "—" not in loaded._roi_start_lbl.text()
 
     def test_clear_roi_resets_labels_and_table(self, loaded, qtbot):
@@ -407,6 +408,7 @@ class TestScenario3SegmentROI:
 # Scenario 4 — Bilateral asymmetry screening
 # ============================================================================
 
+
 class TestScenario4Asymmetry:
     """
     Clinical rationale: Robinson's SI% is the standard ACL-rehabilitation
@@ -418,9 +420,7 @@ class TestScenario4Asymmetry:
     @pytest.fixture
     def asym_tab(self, tmp_path, qtbot):
         tmp = tmp_path
-        path = _make_asymmetric_pose3d(
-            tmp, T=60, l_knee_deg=90.0, r_knee_deg=60.0
-        )
+        path = _make_asymmetric_pose3d(tmp, T=60, l_knee_deg=90.0, r_knee_deg=60.0)
         w = AnalysisTab()
         qtbot.addWidget(w)
         w.show()
@@ -442,7 +442,7 @@ class TestScenario4Asymmetry:
         ROM SI% and PkVel SI% are legitimately '—' when ROM=0 on both sides
         (static pose has no movement), so those columns are not checked here.
         """
-        text = asym_tab._asym_table.item(0, 0).text()   # Mean SI%
+        text = asym_tab._asym_table.item(0, 0).text()  # Mean SI%
         assert text != "—", "Knee Mean SI% is '—' despite nonzero mean angles"
         assert math.isfinite(float(text))
 
@@ -454,13 +454,11 @@ class TestScenario4Asymmetry:
                 text = t.item(r, c).text()
                 if text == "—":
                     continue
-                assert abs(float(text)) < 200.0, (
-                    f"SI[{r},{c}] = {text}% exceeds ±200% sanity bound"
-                )
+                assert abs(float(text)) < 200.0, f"SI[{r},{c}] = {text}% exceeds ±200% sanity bound"
 
     def test_knee_si_is_nonzero_for_asymmetric_joints(self, asym_tab):
         """L=90°, R=60° must produce a detectable SI (well above 10% threshold)."""
-        si = float(asym_tab._asym_table.item(0, 0).text())   # Mean SI%, knee
+        si = float(asym_tab._asym_table.item(0, 0).text())  # Mean SI%, knee
         assert abs(si) > 10.0
 
     def test_knee_si_is_positive_left_dominant(self, asym_tab):
@@ -471,11 +469,11 @@ class TestScenario4Asymmetry:
     def test_knee_si_matches_module_directly(self, asym_tab):
         """UI SI% must equal compute_symmetry_index(l_mean, r_mean)."""
         angles = asym_tab._angles
-        l = compute_extended_stats(angles, _LKNEE, 0, fps=FPS)
-        r = compute_extended_stats(angles, _RKNEE, 0, fps=FPS)
-        if l and r:
-            ref = compute_symmetry_index(l.mean_deg, r.mean_deg)
-            ui  = float(asym_tab._asym_table.item(0, 0).text())
+        left = compute_extended_stats(angles, _LKNEE, 0, fps=FPS)
+        right = compute_extended_stats(angles, _RKNEE, 0, fps=FPS)
+        if left and right:
+            ref = compute_symmetry_index(left.mean_deg, right.mean_deg)
+            ui = float(asym_tab._asym_table.item(0, 0).text())
             assert ui == pytest.approx(ref, abs=0.1)
 
     def test_symmetric_joints_give_near_zero_si(self, qtbot, tmp_path):
@@ -500,6 +498,7 @@ class TestScenario4Asymmetry:
 # ============================================================================
 # Scenario 5 — Full CSV export
 # ============================================================================
+
 
 class TestScenario5FullCsvExport:
     """
@@ -539,9 +538,7 @@ class TestScenario5FullCsvExport:
 
     def test_time_s_increments_by_one_over_fps(self, csv_rows):
         rows, *_ = csv_rows
-        assert float(rows[2][1]) - float(rows[1][1]) == pytest.approx(
-            1.0 / FPS, abs=1e-5
-        )
+        assert float(rows[2][1]) - float(rows[1][1]) == pytest.approx(1.0 / FPS, abs=1e-5)
 
     def test_frame_column_starts_at_zero(self, csv_rows):
         rows, *_ = csv_rows
@@ -553,7 +550,7 @@ class TestScenario5FullCsvExport:
         path = _make_standing_pose3d(tmp_path, T=T, name="nan_test.npz")
         d = np.load(path, allow_pickle=True)
         conf = d["conf3d"].copy()
-        conf[0, 0, 13] = 0.0   # zero L Knee vertex at frame 0
+        conf[0, 0, 13] = 0.0  # zero L Knee vertex at frame 0
         angles = compute_joint_angles(_opencv_to_zup(d["joints3d"]), conf)
         out = str(tmp_path / "nan.csv")
         angles_to_csv(out, angles, fps=FPS)
@@ -570,6 +567,7 @@ class TestScenario5FullCsvExport:
 # Scenario 6 — Segment CSV export
 # ============================================================================
 
+
 class TestScenario6SegmentCsvExport:
     """
     Clinical rationale: Phase-specific exports must have their own
@@ -584,7 +582,7 @@ class TestScenario6SegmentCsvExport:
         path = _make_standing_pose3d(tmp, T=T)
         d = np.load(path, allow_pickle=True)
         angles = compute_joint_angles(_opencv_to_zup(d["joints3d"]), d["conf3d"])
-        f0, f1 = 20, 49          # 30 frames
+        f0, f1 = 20, 49  # 30 frames
         seg = angles[f0 : f1 + 1]
         out = str(tmp / "segment.csv")
         angles_to_csv(out, seg, fps=FPS)
@@ -594,7 +592,7 @@ class TestScenario6SegmentCsvExport:
 
     def test_row_count_equals_segment_length(self, seg_csv):
         rows, seg_len = seg_csv
-        assert len(rows) == seg_len + 1   # +1 header
+        assert len(rows) == seg_len + 1  # +1 header
 
     def test_time_s_starts_at_zero(self, seg_csv):
         rows, _ = seg_csv
@@ -613,6 +611,7 @@ class TestScenario6SegmentCsvExport:
 # ============================================================================
 # Scenario 7 — Playback controls
 # ============================================================================
+
 
 class TestScenario7PlaybackControls:
     """
@@ -697,7 +696,7 @@ class TestScenario7PlaybackControls:
     def test_one_frame_of_elapsed_advances_one_frame(self, tab):
         """At 1× speed, one frame-period of elapsed time advances exactly one frame."""
         tab._slider.setValue(10)
-        tab._advance_by_elapsed(1000.0 / FPS)   # exactly one frame period
+        tab._advance_by_elapsed(1000.0 / FPS)  # exactly one frame period
         assert tab._slider.value() == 11
 
     def test_moderate_long_tick_drops_frames_to_stay_realtime(self, tab):
@@ -711,13 +710,13 @@ class TestScenario7PlaybackControls:
         from app.gui.analysis_tab import _MAX_PLAY_STEP
 
         tab._slider.setValue(10)
-        tab._advance_by_elapsed(20 * 1000.0 / FPS)   # 20 frames' worth
+        tab._advance_by_elapsed(20 * 1000.0 / FPS)  # 20 frames' worth
         assert tab._slider.value() == 10 + _MAX_PLAY_STEP
 
     def test_sub_frame_elapsed_does_not_advance(self, tab):
         """Less than one frame-period of elapsed time holds the current frame."""
         tab._slider.setValue(10)
-        tab._advance_by_elapsed(1000.0 / FPS * 0.4)   # 0.4 of a frame
+        tab._advance_by_elapsed(1000.0 / FPS * 0.4)  # 0.4 of a frame
         assert tab._slider.value() == 10
 
     def test_advance_wraps_at_end(self, tab):
@@ -728,9 +727,9 @@ class TestScenario7PlaybackControls:
     def test_fractional_frames_accumulate(self, tab):
         """Two 0.6-frame ticks accumulate to advance one frame total."""
         tab._slider.setValue(10)
-        tab._advance_by_elapsed(1000.0 / FPS * 0.6)   # 0.6 → 0 frames, 0.6 stored
+        tab._advance_by_elapsed(1000.0 / FPS * 0.6)  # 0.6 → 0 frames, 0.6 stored
         assert tab._slider.value() == 10
-        tab._advance_by_elapsed(1000.0 / FPS * 0.6)   # +0.6 → 1.2 → 1 frame
+        tab._advance_by_elapsed(1000.0 / FPS * 0.6)  # +0.6 → 1.2 → 1 frame
         assert tab._slider.value() == 11
 
     def test_frame_label_shows_current_frame(self, tab):
@@ -766,8 +765,8 @@ class TestScenario7PlaybackControls:
         """
         calls: list[int] = []
         tab._preview_2d.show_frame = lambda f: calls.append(f)  # spy
-        tab._play_btn.setChecked(True)        # start playing
-        tab._slider.setValue(20)              # frame change during playback
+        tab._play_btn.setChecked(True)  # start playing
+        tab._slider.setValue(20)  # frame change during playback
         assert 20 in calls, "2D preview not driven during playback"
         tab._play_btn.setChecked(False)
 
@@ -783,6 +782,7 @@ class TestScenario7PlaybackControls:
 # Scenario 8 — Play-button synchronisation across tabs
 # ============================================================================
 
+
 class TestScenario8PlaySync:
     """
     Clinical rationale: When a physiotherapist plays a recording while a
@@ -794,6 +794,7 @@ class TestScenario8PlaySync:
     @pytest.fixture
     def window(self, qtbot, tmp_path):
         from app.gui.main_window import MainWindow
+
         win = MainWindow()
         qtbot.addWidget(win)
         win.show()
@@ -861,6 +862,7 @@ class TestScenario8PlaySync:
 # Scenario 9 — Confidence threshold control
 # ============================================================================
 
+
 def _make_pose3d_with_lknee_conf(tmp_path: Path, knee_conf: float, T: int = 40) -> str:
     """Standing pose where the L Knee joint (idx 13) has a fixed low confidence.
 
@@ -870,7 +872,7 @@ def _make_pose3d_with_lknee_conf(tmp_path: Path, knee_conf: float, T: int = 40) 
     zup = np.tile(_STANDING_ZUP, (T, 1, 1, 1))
     cv = _zup_to_opencv(zup)
     conf = np.ones((T, 1, 17), dtype=np.float32)
-    conf[:, 0, 13] = knee_conf      # L Knee vertex
+    conf[:, 0, 13] = knee_conf  # L Knee vertex
     meta = {"fps": FPS, "model_name": "synthetic"}
     path = str(tmp_path / "lowconf.npz")
     np.savez(path, joints3d=cv, conf3d=conf, meta=np.array(meta))
@@ -900,11 +902,11 @@ class TestScenario9ConfidenceThreshold:
     def test_default_threshold_keeps_low_conf_knee(self, tab):
         """At the default 0.0 threshold the L Knee Flex angle is computed."""
         assert tab._conf_spin.value() == 0.0
-        assert tab._full_table.item(_LKNEE, 2).text() != "—"   # Mean column
+        assert tab._full_table.item(_LKNEE, 2).text() != "—"  # Mean column
 
     def test_raising_threshold_drops_low_conf_angle_to_dash(self, tab):
         """Raising the threshold above the knee confidence NaNs the L Knee row."""
-        tab._conf_spin.setValue(0.50)   # > 0.20 → L Knee excluded
+        tab._conf_spin.setValue(0.50)  # > 0.20 → L Knee excluded
         _pump()
         for c in range(tab._full_table.columnCount()):
             assert tab._full_table.item(_LKNEE, c).text() == "—", (
@@ -921,7 +923,7 @@ class TestScenario9ConfidenceThreshold:
         """Dropping the threshold back below the knee confidence restores it."""
         tab._conf_spin.setValue(0.50)
         _pump()
-        tab._conf_spin.setValue(0.10)   # < 0.20 → L Knee back in
+        tab._conf_spin.setValue(0.10)  # < 0.20 → L Knee back in
         _pump()
         assert tab._full_table.item(_LKNEE, 2).text() != "—"
 
@@ -930,13 +932,14 @@ class TestScenario9ConfidenceThreshold:
         w = AnalysisTab()
         qtbot.addWidget(w)
         w.show()
-        w._conf_spin.setValue(0.7)   # no data loaded — must be a no-op
+        w._conf_spin.setValue(0.7)  # no data loaded — must be a no-op
         _pump()
 
 
 # ============================================================================
 # Scenario 10 — Floor world-frame pose3d is used as-is (no OpenCV→Zup swap)
 # ============================================================================
+
 
 def _make_world_frame_pose3d(tmp_path: Path, T: int = 30) -> tuple[str, np.ndarray]:
     """pose3d.npz already in a Z-up floor world frame (meta coordinate_frame='world')."""
@@ -976,7 +979,5 @@ class TestScenario10WorldFrameConsumed:
         w.show()
         w.load_pose3d(path)
         _pump()
-        expected = np.stack(
-            [cv_joints[..., 0], cv_joints[..., 2], -cv_joints[..., 1]], axis=-1
-        )
+        expected = np.stack([cv_joints[..., 0], cv_joints[..., 2], -cv_joints[..., 1]], axis=-1)
         assert np.allclose(w._joints_zup, expected, atol=1e-5)

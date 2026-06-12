@@ -302,6 +302,14 @@ class ReconTab(QWidget):
         self._num_poses = QSpinBox()
         self._num_poses.setRange(1, 6)
         self._num_poses.setValue(1)
+        self._num_poses.setToolTip(
+            "Maximum people detected per frame.\n\n"
+            "CAUTION with more than 1: there is no cross-view identity matching — "
+            "person slot N in the left view is paired with slot N in the right view "
+            "purely by detection order. Reliable for a single person; when several "
+            "people overlap or cross, identities can swap and the wrong bodies get "
+            "triangulated."
+        )
         oform.addRow("Max persons:", self._num_poses)
 
         self._min_conf = QDoubleSpinBox()

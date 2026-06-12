@@ -33,8 +33,7 @@ cameras or offline from recordings. Everything runs on the CPU.
   real-world Z-up metres (origin on the floor).
 - 📊 **Biomechanics** — nine joint angles (L/R knee · hip · elbow · shoulder + trunk), ROM / SD /
   symmetry stats, time-series plots synced to the 3D view.
-- 🔴 **Live capture** — FLIR BlackflyS via PySpin with hardware sync and live 2D + 3D tracking;
-  transparently falls back to a video/webcam **simulator** when no SDK is present.
+- 🔴 **Live capture** — FLIR BlackflyS via PySpin with hardware sync and live 2D + 3D tracking.
 - 💾 **Open outputs** — `calibration.yml`, `pose2d_*.npz`, `pose3d.npz`, and CSV for
   R / Excel / Visual3D.
 
@@ -98,8 +97,8 @@ The Spinnaker / PySpin wheel can't be redistributed via PyPI, so install it from
 uv pip install external/spinnaker_python-*.whl   # re-run after any `uv sync`
 ```
 
-No SDK or no cameras? BatPose falls back to a video/webcam simulator, so the full pipeline still
-runs end-to-end.
+No SDK or no cameras? The Live Capture tab stays disabled, but the full **offline** pipeline
+(calibrate → 2D pose → 3D reconstruction → analysis) works on recorded videos.
 
 ## 🛠️ Development
 
