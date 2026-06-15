@@ -42,3 +42,12 @@ pose3d.npz
 
 # Dev scratch
 .write_test
+
+# Local-only AI-assistant instructions — kept on disk, never published.
+CLAUDE.md
+AGENTS.md
+
+# git-history rewrite backup artifacts (safe to delete)
+BatPose-pre-rewrite.bundle
+CLAUDE.md.keep
+mailmap_rewrite.txt
