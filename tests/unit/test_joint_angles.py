@@ -9,6 +9,7 @@ from app.biomech import (
     ANGLE_DEFINITIONS,
     AngleStats,
     angles_to_csv,
+    compute_extended_stats,
     compute_joint_angles,
     compute_stats,
 )
@@ -429,3 +430,43 @@ class TestAnglesToCsv:
         angles = np.zeros((1, 1, 2), dtype=np.float32)
         with pytest.raises(ValueError):
             angles_to_csv(str(tmp_path / "x.csv"), angles, fps=0.0, angle_names=["A", "B"])
+
+
+class TestPeakVelocityGapHandling:
+    """Peak angular velocity must not be inflated by NaN tracking gaps.
+
+    Regression: compute_extended_stats used to differentiate the NaN-COMPACTED
+    series with a uniform dt, so two samples straddling an N-frame gap were
+    treated as one frame apart — inflating peak velocity by up to Nx.
+    """
+
+    @staticmethod
+    def _stats(series, fps=30.0):
+        arr = np.asarray(series, dtype=np.float64).reshape(-1, 1, 1)
+        return compute_extended_stats(arr, 0, 0, fps=fps)
+
+    def test_gap_does_not_inflate_peak_velocity(self):
+        series = np.full(20, np.nan)
+        series[0:5] = [0.0, 1.0, 2.0, 3.0, 4.0]  # run 1: 1 deg/frame -> 30 deg/s
+        series[15:20] = [54.0, 55.0, 56.0, 57.0, 58.0]  # run 2, +50 deg over a 10-frame gap
+        st = self._stats(series)
+        # Genuine within-run velocity is 1 deg/frame = 30 deg/s.  The 50 deg
+        # jump across the gap must NOT be counted (old bug -> ~765 deg/s).
+        assert st.peak_vel_deg_s == pytest.approx(30.0, abs=1.0)
+        assert st.peak_vel_deg_s < 100.0
+
+    def test_no_gap_matches_plain_gradient(self):
+        fps = 30.0
+        series = np.array([0.0, 2.0, 4.0, 9.0, 12.0, 13.0])
+        expected = float(np.max(np.abs(np.gradient(series, 1.0 / fps))))
+        assert self._stats(series, fps).peak_vel_deg_s == pytest.approx(expected)
+
+    def test_fast_within_run_movement_is_captured(self):
+        # Sustained 20 deg/frame ramp at 30 fps = 600 deg/s (real, not a gap).
+        st = self._stats([0.0, 20.0, 40.0, 60.0])
+        assert st.peak_vel_deg_s == pytest.approx(600.0, abs=1.0)
+
+    def test_isolated_samples_between_gaps_give_zero_velocity(self):
+        series = np.full(7, np.nan)
+        series[0], series[3], series[6] = 5.0, 40.0, 5.0  # each isolated by gaps
+        assert self._stats(series).peak_vel_deg_s == 0.0

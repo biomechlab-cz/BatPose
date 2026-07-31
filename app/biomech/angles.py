@@ -346,19 +346,27 @@ def compute_extended_stats(
     median_v = float(np.median(finite))
     cv_pct = 100.0 * std_v / abs(mean_v) if abs(mean_v) > _EPS else 0.0
 
-    # Angular velocity (deg/s): finite-difference on non-NaN values only.
-    # Use np.gradient with dt=1/fps; mask NaN before differentiating to avoid
-    # spurious large jumps at gap edges.
-    vel_series = np.full_like(series, np.nan)
-    non_nan_idx = np.where(~np.isnan(series))[0]
-    if len(non_nan_idx) >= 2:
-        # Gradient on the non-NaN sub-sequence, then place back.
-        sub = series[non_nan_idx]
-        dt = 1.0 / fps
-        sub_vel = np.gradient(sub, dt)
-        vel_series[non_nan_idx] = sub_vel
-    finite_vel = vel_series[~np.isnan(vel_series)]
-    peak_vel = float(np.max(np.abs(finite_vel))) if finite_vel.size > 0 else 0.0
+    # Peak angular velocity (deg/s): central finite-difference WITHIN each
+    # contiguous run of valid samples.  Differentiating the NaN-COMPACTED series
+    # with a uniform dt=1/fps (the previous approach) treated two samples that
+    # straddle an N-frame gap as one frame apart — inflating the peak by up to
+    # Nx.  Differentiating each gap-free run separately compares only genuinely
+    # adjacent frames, so a tracking gap can never inflate the peak velocity.
+    dt = 1.0 / fps
+    valid = ~np.isnan(series)
+    peak_vel = 0.0
+    start = 0
+    while start < T:
+        if not valid[start]:
+            start += 1
+            continue
+        end = start
+        while end < T and valid[end]:
+            end += 1
+        run = series[start:end]  # contiguous → genuinely 1/fps-spaced
+        if run.size >= 2:
+            peak_vel = max(peak_vel, float(np.max(np.abs(np.gradient(run, dt)))))
+        start = end
 
     # Total angular excursion: Σ |θ[t+1] − θ[t]| skipping NaN gaps.
     excursion = 0.0
