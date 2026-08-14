@@ -17,6 +17,7 @@ tests/
 ├── unit/
 │   ├── test_board.py         # Board detection (ChessboardDetector, CharucoDetector)
 │   ├── test_calib_cli.py     # Calibration CLI argument parsing
+│   ├── test_calib_validate.py # Calibration repeatability comparison (validate repeat)
 │   ├── test_frame_select.py  # Coverage score for calibration frame selection
 │   ├── test_recon3d_cli.py   # Recon3D CLI argument parsing
 │   ├── test_smooth.py        # OneEuro filter + smooth_trajectory
@@ -67,6 +68,28 @@ Covers `app.recon3d.smooth`:
   reduction ≥ 50 %, reset behaviour.
 - `smooth_trajectory`: shape preservation for 2-D `(T, 3)` and 4-D `(T, P, J, 3)` arrays,
   constant trajectory stability after warm-up.
+
+### test_calib_validate.py
+Covers `app.calib.validate` (the `repeat` repeatability comparison):
+- `MetricRow` statistics: sample SD (`ddof=1`), range, CoV; CoV suppressed for signed
+  quantities (Tx, rvec, distortion coeffs); NaN values ignored rather than propagated;
+  range over a single finite value is NaN, not `0.0` (which would read as perfect agreement).
+- Rotation helpers: known yaw recovered by `rotation_angle_deg`, `rotation_diff_deg` on a
+  2.5° pair, arccos clamp survives a non-orthonormal matrix, pairwise matrix symmetric with
+  a zero diagonal.
+- Parameter rows: baseline reported in mm, focal/baseline/rotation spreads detected,
+  distortion row count follows the model (4 fisheye vs 5 pinhole), missing `quality` → NaN.
+- Input validation: <2 calibrations, label-count mismatch, mixed lens models, mixed image
+  sizes and mixed coefficient counts all raise; a differing `board_cfg` warns and proceeds;
+  identical calibrations give exactly zero spread.
+- Rendering: report is **ASCII-only** (cp1250 consoles), NaN renders as `n/a`, a long table
+  title does not widen the name column, CSV header/row count, JSON round-trips and is keyed
+  by run label.
+- Segment cross-check on synthetic pinhole projections: recovered thigh length within 5 mm
+  of truth, identical calibrations → zero segment spread, and a **1 % baseline error scales
+  every segment by 1 %** (the property that makes the mm figure interpretable).
+- CLI: parser defaults, subcommand/`--calib` required, and `main()` end-to-end through real
+  YAML files (table printed, CSV+JSON written, single-calib and half-a-pose2d-pair rejected).
 
 ## End-to-end smoke tests
 

@@ -83,6 +83,43 @@ with the standard model produces a calibration that silently breaks 3D reconstru
 
 Output: `calibration.yml` containing K1, D1, K2, D2, R, T, the lens model and quality metrics.
 
+### Checking calibration repeatability
+
+`quality.rms` is the residual of the fit that produced it — it cannot tell you how
+*reproducible* a calibration is. Calibrate the same rig two or more times (separate board
+sweeps, each saved to its own file) and compare:
+
+```bash
+python -m app.calib.validate repeat --calib runA.yml runB.yml runC.yml --out out/repeat
+```
+
+This prints a table of every parameter — fx, fy, cx, cy, distortion coefficients, baseline
+`|T|` in mm, relative rotation in degrees, plus the reported RMS and frame count — with
+mean, SD, range and CoV across the runs, followed by the pairwise relative-rotation
+differences. `--out` also writes `repeat_parameters.csv` and `repeat_metrics.json`.
+
+Parameter SDs are hard to interpret on their own, so you can additionally triangulate one
+2D pose recording with each calibration and compare the resulting body-segment lengths:
+
+```bash
+python -m app.calib.validate repeat \
+  --calib runA.yml runB.yml runC.yml \
+  --pose2d-left project/pose2d_left.npz \
+  --pose2d-right project/pose2d_right.npz \
+  --out out/repeat
+```
+
+The summary line then reads e.g. *"Worst-case segment-length agreement: SD = 3.8 mm"* —
+the disagreement in millimetres that repeated calibration causes in the actual 3D output.
+The `median reproj err` row is a useful sanity check per calibration: a run with a much
+higher value is geometrically worse regardless of its board RMS (see ADR-006's note on
+short baseline / high vergence).
+
+Calibrations with different lens models, image sizes, or distortion-coefficient counts are
+rejected — those are not the same quantity and comparing them would be meaningless. A
+differing `board_cfg` is allowed but warned about, since it mixes board differences into
+the spread.
+
 ---
 
 ## 2D Pose Extraction
