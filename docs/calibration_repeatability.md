@@ -10,7 +10,7 @@ calibration.
 | **Session** | 2026-08-14, single session; cameras, focus and aperture untouched throughout |
 | **Software** | BatPose `b5aa3cc` (+ the fix in §5), OpenCV 4.11.0, numpy 1.26.4, MediaPipe 0.10.32, Python 3.10.18 |
 | **Subject distance** | median 1.46 m from camera 1 (5th–95th percentile 1.02–1.68 m) |
-| **Artefacts** | `out/validation/` (calibrations, logs, CSV/JSON metrics, figures) |
+| **Artefacts** | figures in `docs/img/`; measured data in `out/validation/` (not version-controlled — see §7) |
 
 ## 1. What is being validated, and why
 
@@ -111,9 +111,20 @@ depending on how often each joint pair passed the confidence and reprojection ga
 | Reported board RMS | px | 0.742 | 0.220 | 0.565 | 29.6 % |
 | Frames used | — | 38 | 2 | 5 | — |
 
-Distortion coefficients (fisheye k1…k4, both cameras) are in
-`out/validation/repeat/repeat_parameters.csv`. The largest SD among them is 0.013 (right
-k3); k1 — the dominant term — is reproduced to SD 0.0027 (left) and 0.0014 (right).
+Fisheye distortion coefficients:
+
+| Coefficient | Mean | SD | Range | | Coefficient | Mean | SD | Range |
+|---|---|---|---|---|---|---|---|---|
+| Left k1 | −0.03689 | 0.00270 | 0.00730 | | Right k1 | −0.03969 | 0.00141 | 0.00386 |
+| Left k2 | 0.00084 | 0.00587 | 0.01528 | | Right k2 | 0.00643 | 0.00852 | 0.02286 |
+| Left k3 | −0.00277 | 0.00778 | 0.01911 | | Right k3 | −0.00748 | 0.01324 | 0.03288 |
+| Left k4 | 0.00206 | 0.00372 | 0.00861 | | Right k4 | 0.00318 | 0.00751 | 0.01884 |
+
+k1 — the dominant term — is reproduced to SD 0.0027 (left) and 0.0014 (right); the largest
+SD among all eight is 0.0132 (right k3). The higher-order coefficients are individually
+less stable, which is expected: k2…k4 are correlated corrections on the equidistant
+fisheye base and trade off against one another between runs. What matters for
+reconstruction is the resulting geometry, and that is what §4.2 and §4.5 quantify.
 
 Largest pairwise relative-rotation difference between any two runs: **0.394°** (rec1 vs
 rec4). Full matrix in `repeat_metrics.json`.
@@ -195,11 +206,25 @@ convergence of this rig is therefore not degrading reconstruction at the working
 
 ### 4.6 Figures
 
-| File | Content |
-|---|---|
-| `out/validation/figures/fig1_parameter_repeatability.png` | (a) CoV of intrinsics and baseline; (b) SD of relative orientation in degrees |
-| `out/validation/figures/fig2_per_run_parameters.png` | Per-run baseline, relative rotation and board RMS with mean ± SD band |
-| `out/validation/figures/fig3_segment_agreement.png` | (a) Segment lengths per calibration; (b) per-segment SD in mm |
+![Parameter repeatability](img/fig1_parameter_repeatability.svg)
+
+**Figure 1.** (a) Coefficient of variation across the five calibrations for the intrinsics
+and the baseline; (b) standard deviation of the relative orientation, in degrees.
+
+![Per-run parameters](img/fig2_per_run_parameters.svg)
+
+**Figure 2.** Per-run baseline, relative rotation and reported board RMS, with the mean
+± SD band. Recording 2 is a clear outlier in RMS (right panel) while sitting inside the
+band for baseline and rotation — the sensitivity result of §4.3 seen directly.
+
+![Segment agreement](img/fig3_segment_agreement.svg)
+
+**Figure 3.** (a) The ten segment lengths measured from the same recording with each of the
+five calibrations — the five bars per segment are visually indistinguishable; (b) the
+per-segment standard deviation across calibrations, in millimetres.
+
+Figures are committed as vector SVG under `docs/img/`. Raster (300 dpi PNG) versions are
+written alongside them into `out/validation/figures/` by the same script.
 
 ## 5. Defect found and fixed during this validation
 
@@ -256,5 +281,10 @@ then the five calibration commands of §3, the 2D pose extraction
 python -m app.pose2d --left "data/Calibration test/capture/20260814_111239_left.avi" --right "data/Calibration test/capture/20260814_111239_right.avi" --outdir out/validation/pose2d_rec1
 ```
 
-and finally the comparison command of §3. Figures are produced by
-`out/validation/make_figures.py` from `repeat/repeat_metrics.json`.
+and finally the comparison command of §3. The five calibration runs are scripted in
+[`scripts/calib_repeatability_runs.sh`](../scripts/calib_repeatability_runs.sh), and the
+figures are produced from `repeat/repeat_metrics.json` by
+
+```bash
+python scripts/calib_repeatability_figures.py out/validation/repeat/repeat_metrics.json out/validation/figures
+```

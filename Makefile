@@ -8,12 +8,12 @@ install-extras:
 	uv pip install -e ".[dev,rtmpose]" --constraint <(echo "PySide6<6.8")
 
 lint:
-	uv run ruff check app/ tests/ --fix
-	uv run ruff format app/ tests/
+	uv run ruff check app/ tests/ scripts/ --fix
+	uv run ruff format app/ tests/ scripts/
 
 lint-check:
-	uv run ruff check app/ tests/
-	uv run ruff format --check app/ tests/
+	uv run ruff check app/ tests/ scripts/
+	uv run ruff format --check app/ tests/ scripts/
 
 test:
 	uv run pytest tests/unit -v
