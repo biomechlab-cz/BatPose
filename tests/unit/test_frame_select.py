@@ -280,3 +280,105 @@ class TestMatchTemporalPairs:
         solo_r = {2: _det(), 102: _det(), 202: _det()}
         result = _match_temporal_pairs(solo_l, solo_r, actual_window=5)
         assert len(result) == 3
+
+
+class TestPartialDetectionsExcluded:
+    """Regression: a corner-less "partial" detection is not calibration data.
+
+    CharucoDetector returns DetectionResult(partial=True) with EMPTY point
+    arrays when ArUco markers are visible but the board layout does not match —
+    a UI diagnostic only.  Treating it as a detection put empty point sets into
+    all_det_*_out, and the fisheye phase-1 _spatial_subsample then took the
+    centroid of zero points → NaN → "cannot convert float NaN to integer",
+    aborting the whole calibration run.
+    """
+
+    @staticmethod
+    def _partial():
+        from app.calib.board import DetectionResult
+
+        return DetectionResult(
+            obj_pts=np.empty((0, 3), np.float32),
+            img_pts=np.empty((0, 2), np.float32),
+            n_markers=3,
+            partial=True,
+        )
+
+    @staticmethod
+    def _write_video(path, n_frames=6, size=(64, 48)):
+        cv2 = pytest.importorskip("cv2")
+        w, h = size
+        vw = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (w, h))
+        for _ in range(n_frames):
+            vw.write(np.full((h, w, 3), 128, np.uint8))
+        vw.release()
+        return str(path)
+
+    class _StubDetector:
+        """Minimal BoardDetector returning a fixed result for every frame."""
+
+        def __init__(self, result):
+            self._result = result
+
+        def detect(self, gray):
+            return self._result
+
+        @property
+        def board_cfg(self):
+            return {"type": "charuco"}
+
+        @property
+        def min_corners(self):
+            return 4
+
+    def test_partial_not_collected_and_no_pairs(self, tmp_path):
+        from app.calib.frame_select import extract_calibration_frames
+
+        left = self._write_video(tmp_path / "l.avi")
+        right = self._write_video(tmp_path / "r.avi")
+        all_l, all_r = [], []
+        sel = extract_calibration_frames(
+            left,
+            right,
+            self._StubDetector(self._partial()),
+            sample_every=1,
+            all_det_l_out=all_l,
+            all_det_r_out=all_r,
+        )
+        assert all_l == [] and all_r == []
+        assert sel == []
+
+    def test_real_detections_still_collected(self, tmp_path):
+        """The fix must not stop genuine detections from being collected."""
+        from app.calib.frame_select import extract_calibration_frames
+
+        left = self._write_video(tmp_path / "l.avi")
+        right = self._write_video(tmp_path / "r.avi")
+        all_l, all_r = [], []
+        extract_calibration_frames(
+            left,
+            right,
+            self._StubDetector(_det(8)),
+            sample_every=1,
+            all_det_l_out=all_l,
+            all_det_r_out=all_r,
+        )
+        assert len(all_l) > 0 and len(all_r) > 0
+
+
+class TestSpatialSubsampleEmptyGuard:
+    """Defence in depth for the same failure inside _spatial_subsample."""
+
+    def test_corner_less_detection_does_not_crash(self):
+        from app.calib.board import DetectionResult
+        from app.calib.stereo import _spatial_subsample
+
+        empty = DetectionResult(
+            obj_pts=np.empty((0, 3), np.float32),
+            img_pts=np.empty((0, 2), np.float32),
+            partial=True,
+        )
+        good = [_det(8) for _ in range(5)]
+        out = _spatial_subsample([empty, *good, empty], (640, 480), n_max=3)
+        assert len(out) == 3
+        assert all(len(d.img_pts) > 0 for d in out)

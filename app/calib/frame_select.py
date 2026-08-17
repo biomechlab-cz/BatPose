@@ -230,8 +230,15 @@ def extract_calibration_frames(
                 det_l = _fut_l.result()
                 det_r = _fut_r.result()
 
-            det_l_ok = det_l is not None
-            det_r_ok = det_r is not None
+            # A "partial" result carries ZERO corners — it exists only as a UI
+            # diagnostic ("ArUco markers seen but the board config doesn't
+            # match"), not as calibration data.  Counting it as a detection put
+            # empty point sets into all_det_*_out, and the fisheye phase-1
+            # _spatial_subsample then took the centroid of no points → NaN →
+            # "cannot convert float NaN to integer".  Same rule as the live path
+            # in capture_tab (det is not None and not det.partial).
+            det_l_ok = det_l is not None and not det_l.partial
+            det_r_ok = det_r is not None and not det_r.partial
 
             if det_l_ok:
                 n_det_l += 1

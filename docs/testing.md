@@ -43,7 +43,13 @@ Covers `app.calib.board`:
 No real camera or video file is required.
 
 ### test_frame_select.py
-Covers `app.calib.frame_select._coverage_score`:
+Covers `app.calib.frame_select`. **Partial-detection regression** (`TestPartialDetectionsExcluded`,
+`TestSpatialSubsampleEmptyGuard`): `CharucoDetector` returns a `partial=True` result with
+*zero* corners as a UI diagnostic; treating it as a detection put empty point sets into the
+fisheye phase-1 list, and `_spatial_subsample` then took the centroid of no points → NaN →
+`cannot convert float NaN to integer`, aborting calibration. Tests assert partial results are
+neither collected nor paired, that genuine detections still are, and that `_spatial_subsample`
+survives a corner-less entry. Also covers `_coverage_score`:
 - Full image coverage (all 4×4 cells hit) → score == 1.0.
 - Single-cell cluster → score == 1/16.
 - Half-grid coverage → score == 0.5.

@@ -54,6 +54,11 @@ def _spatial_subsample(
 
     bins: dict[tuple[int, int], list] = {}
     for det in detections:
+        # Defence in depth: a corner-less detection has no centroid (mean of an
+        # empty array is NaN, and int(NaN) raises).  Callers should already have
+        # filtered these out — see the partial-detection note in frame_select.
+        if det.img_pts is None or len(det.img_pts) == 0:
+            continue
         ctr = det.img_pts.reshape(-1, 2).mean(axis=0)
         ci = min(max(int(ctr[0] / cell_w), 0), grid - 1)
         cj = min(max(int(ctr[1] / cell_h), 0), grid - 1)
