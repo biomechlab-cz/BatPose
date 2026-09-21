@@ -1192,7 +1192,7 @@ class ReconTab(QWidget):
                 "n_frames": T,
                 "n_persons": P,
                 "n_joints": J,
-                "software_version": "BatPose 0.1.0",
+                "software_version": "BatPose 1.1.0",
                 "export_date": datetime.datetime.now().isoformat(),
             }
             # Include calibration RMS if available

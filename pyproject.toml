@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "batpose"
-version = "0.1.0"
+version = "1.1.0"
 description = "Stereo FLIR Calibration + 3D Human Pose Estimation"
 readme = "README.md"
 requires-python = ">=3.10"

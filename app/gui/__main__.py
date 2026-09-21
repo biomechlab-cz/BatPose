@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("BatPose")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("1.1.0")
     app.setOrganizationName("BatPose")
 
     # Application icon (title bar / taskbar).

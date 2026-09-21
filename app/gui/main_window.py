@@ -380,7 +380,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About BatPose",
-            "<b>BatPose</b> v0.1.0<br>"
+            "<b>BatPose</b> v1.1.0<br>"
             "Stereo FLIR Calibration + 3D Human Pose Estimation<br><br>"
             "CPU-first pipeline using:<br>"
             "• MediaPipe Pose Landmarker (COCO-17)<br>"
