@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/python-3.10+-blue">
   <img src="https://img.shields.io/badge/GPU-not_required-brightgreen">
   <img src="https://img.shields.io/badge/UI-PySide6-41cd52">
-  <img src="https://img.shields.io/badge/license-MIT-green">
+  <img src="https://img.shields.io/badge/license-GPL--2.0-green">
 </p>
 
 ---
@@ -115,4 +115,5 @@ More docs: [quickstart](docs/quickstart.md) · [skeleton mapping](docs/skeleton_
 
 ## 📄 License
 
-Released under the **MIT** License (declared in `pyproject.toml`).
+Released under the **GNU General Public License v2.0**. The full text is in
+[LICENSE](LICENSE).

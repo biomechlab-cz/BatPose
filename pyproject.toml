@@ -8,7 +8,8 @@ version = "1.1.0"
 description = "Stereo FLIR Calibration + 3D Human Pose Estimation"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "GPL-2.0-only" }
+license-files = ["LICENSE"]
 dependencies = [
     "opencv-contrib-python>=4.8",
     "numpy>=1.26,<2.0",
