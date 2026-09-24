@@ -1,0 +1,61 @@
+{
+  "package": "BatPose P3 configuration 1 real-data example",
+  "status": "review copy; independent repeat run and exact source commit pending",
+  "video": {
+    "width_px": 1920,
+    "height_px": 1200,
+    "fps": 20,
+    "frames_per_view": 966
+  },
+  "export": {
+    "frames": 966,
+    "persons": 1,
+    "joints": 17,
+    "coordinate_units": "meters",
+    "coordinate_frame": "world",
+    "reported_software_version": "BatPose 0.1.0",
+    "calibration_rms_px": 1.0324675600314674
+  },
+  "files": {
+    "P3_1_left.avi": {
+      "bytes": 162286850,
+      "sha256": "fe0b08379532ea82cb916959b2f8d5e89aa06b6e4b7a716bc8bff15a9628aa4e"
+    },
+    "P3_1_right.avi": {
+      "bytes": 175355900,
+      "sha256": "ab725646b6e20c65e0c71bdb6c768542ff75eeef6f4cf2879c30e376f1cb94a2"
+    },
+    "calibration1.yml": {
+      "bytes": 2381,
+      "sha256": "0b2caf397d0cfbfa4dd31dd6f89787bdcfa2e63db7a69bdbc60139f1670c1988"
+    },
+    "P3_1.csv": {
+      "bytes": 588817,
+      "sha256": "00c5db040cc2f86f683620d88d53442d3342d38834f6f1d621b632b60832bf39"
+    },
+    "P3_1.npz": {
+      "bytes": 272563,
+      "sha256": "2aed9ab55c6d946835da6acdbae3e0467295377bc6f18a38693d7cc6f8e34b94"
+    },
+    "P3_1_angles.csv": {
+      "bytes": 80949,
+      "sha256": "b5206554cdcc145c96578b40816e7af2b31d381d927ca2b82f9c8608bfa19623"
+    },
+    "P3_1_metadata.json": {
+      "bytes": 275,
+      "sha256": "0c69c1047f429fb02ad66ef0185e6d625f831a57b9c23b23a1454e6d9c805653"
+    },
+    "P3_1_timestamps.csv": {
+      "bytes": 42436,
+      "sha256": "30c01096ebbb4aa2c6ccd64adb33bd82655ca5a88765950acf940c8585f18978"
+    },
+    "flash_events_left.csv": {
+      "bytes": 117,
+      "sha256": "494d8bc1b70649db55baceb222ebed1731679c92db744568c653a239c6f224f7"
+    },
+    "README_BatPose_Real_Data_Example.md": {
+      "bytes": 5009,
+      "sha256": "0b90ef9a62eb1baeb9a6282887521cf7ef701185f07cd96d2490896c8f4d8181"
+    }
+  }
+}

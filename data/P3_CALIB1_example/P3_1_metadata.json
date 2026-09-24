@@ -1,0 +1,11 @@
+{
+  "fps": 20.0,
+  "coordinate_units": "meters",
+  "coordinate_frame": "world",
+  "n_frames": 966,
+  "n_persons": 1,
+  "n_joints": 17,
+  "software_version": "BatPose 0.1.0",
+  "export_date": "2026-09-06T14:33:11.774542",
+  "calibration_rms_px": 1.0324675600314674
+}

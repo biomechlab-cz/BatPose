@@ -1,0 +1,2 @@
+data/P3_CALIB1_example/** -text
+data/P3_CALIB1_example/*.avi filter=lfs diff=lfs merge=lfs -text
